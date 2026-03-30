@@ -63,7 +63,7 @@ app.post('/api/run-advisor', async (req, res) => {
     });
     console.log(`🗄️  Record: ${record_id}`);
 
-    browser = await chromium.launch({ headless: false, slowMo: 80 });
+    browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
     await dbUpdate(record_id, { status: 'running' });
