@@ -85,13 +85,18 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.goto('https://bosch-de-heatpump.thernovo.com/home', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000);
 
-    // Cookie Banner — warten bis er komplett weg ist
+    // Cookie Banner — klicken + aus DOM entfernen damit es nichts blockiert
     try {
       await page.getByRole('button', { name: 'Alles akzeptieren' }).click({ timeout: 5000, force: true });
-      // Warten bis dock-privacy-settings aus dem DOM verschwindet
-      await page.waitForSelector('dock-privacy-settings', { state: 'hidden', timeout: 8000 }).catch(() => {});
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(500);
     } catch (e) {}
+
+    // dock-privacy-settings komplett aus DOM entfernen (blockiert sonst alle Klicks)
+    await page.evaluate(() => {
+      const el = document.querySelector('dock-privacy-settings');
+      if (el) el.remove();
+    });
+    await page.waitForTimeout(500);
 
     // Formular aktivieren + PLZ
     await page.getByText('Straße Hausnummer').click({ force: true });
