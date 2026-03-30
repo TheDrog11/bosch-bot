@@ -53,6 +53,22 @@ app.post('/api/run-advisor', async (req, res) => {
     return data.id;
   }
 
+  // ── Concurrency Check — nur ein Run pro Lead gleichzeitig ───────────────
+  const { data: laufend } = await supabase
+    .from('lead_hpa_results')
+    .select('id')
+    .eq('lead_id', lead_id)
+    .in('status', ['pending', 'running'])
+    .limit(1);
+
+  if (laufend && laufend.length > 0) {
+    return res.status(409).json({
+      success: false,
+      error: 'Ein HPA-Lauf für diesen Lead läuft bereits.',
+      record_id: laufend[0].id,
+    });
+  }
+
   // ── DB: pending (vor der Antwort) ───────────────────────────────────────
   console.log(`\n🚀 Lead: ${lead_id}`);
   try {
@@ -175,13 +191,19 @@ app.post('/api/run-advisor', async (req, res) => {
 
     // ── SCHRITT 10: Technologie Art → Default Luft/Wasser Monoblock → Weiter─
     console.log('🌬️  [10] Technologie Art...');
-    await page.waitForSelector('text=Welche Technologie', { timeout: 30000 });
+    await page.waitForTimeout(1500); // Seite laden lassen
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
 
-    // ── SCHRITT 11: Technologie Aufstellung → Default Außenaufstellung ───────
+    // ── SCHRITT 11: Technologie Aufstellung → nur klicken wenn Seite da ist ──
     console.log('🏠 [11] Technologie Aufstellung...');
-    await page.waitForSelector('text=Welche Technologie', { timeout: 30000 });
+    await page.waitForTimeout(1500);
+    // Prüfen ob noch eine weitere Technologie-Seite kommt (bei hoher Leistung nicht immer)
+    const aufAufstellungsSeite = await page.getByRole('button', { name: 'Weiter' }).isEnabled().catch(() => false);
+    if (aufAufstellungsSeite) {
+      await page.getByRole('button', { name: 'Weiter' }).click();
+      await page.waitForTimeout(700);
+    } // Seite laden lassen
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
 
@@ -366,8 +388,13 @@ app.post('/api/run-advisor', async (req, res) => {
 
     console.log(`🎯 Decision: ${decision} (${beste.pct}%) ${warning_message ?? ''}`);
 
-    // Finales Produkt
-    empfohlenes_produkt = `Compress ${serie} ${finalesAW} + ${csModel}`;
+    // Finales Produkt — aus der Ergebnisseite lesen (Ausgewählt-Spalte)
+    // Nicht unser vorberechnetes csModel verwenden, sondern was Bosch tatsächlich zeigt
+    const ausgewaehlteSpalte = tabellenDaten.spaltenKoepfe.find((_, i) => i === ausgewaehltIndex) 
+      ?? tabellenDaten.spaltenKoepfe[0];
+    empfohlenes_produkt = ausgewaehlteSpalte 
+      ? `Compress ${serie} ${ausgewaehlteSpalte}`
+      : `Compress ${serie} ${finalesAW} + ${csModel}`;
 
     // ── PDF Download ─────────────────────────────────────────────────────────
     console.log('📥 PDF Download...');
