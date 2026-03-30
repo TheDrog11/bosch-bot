@@ -63,7 +63,10 @@ app.post('/api/run-advisor', async (req, res) => {
     });
     console.log(`🗄️  Record: ${record_id}`);
 
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    });
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
     await dbUpdate(record_id, { status: 'running' });
@@ -72,16 +75,18 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.goto('https://bosch-de-heatpump.thernovo.com/home', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000);
 
-    // Cookie Banner
+    // Cookie Banner — warten bis er komplett weg ist
     try {
       await page.getByRole('button', { name: 'Alles akzeptieren' }).click({ timeout: 5000, force: true });
-      await page.waitForTimeout(500);
+      // Warten bis dock-privacy-settings aus dem DOM verschwindet
+      await page.waitForSelector('dock-privacy-settings', { state: 'hidden', timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(800);
     } catch (e) {}
 
     // Formular aktivieren + PLZ
     await page.getByText('Straße Hausnummer').click({ force: true });
     await page.waitForTimeout(300);
-    await page.locator('.col-md-12').click();
+    await page.locator('.col-md-12').click({ force: true });
     await page.waitForTimeout(300);
     console.log('📍 PLZ: ' + plz);
     await page.getByRole('textbox', { name: 'PLZ *' }).click();
@@ -450,4 +455,5 @@ app.post('/api/run-advisor', async (req, res) => {
   }
 });
 
-app.listen(3000, () => console.log('🤖 Bosch HPA Bot läuft auf Port 3000'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🤖 Bosch HPA Bot läuft auf Port ${PORT}`));
