@@ -175,13 +175,13 @@ app.post('/api/run-advisor', async (req, res) => {
 
     // ── SCHRITT 10: Technologie Art → Default Luft/Wasser Monoblock → Weiter─
     console.log('🌬️  [10] Technologie Art...');
-    await page.waitForSelector('text=Welche Technologie', { timeout: 20000 });
+    await page.waitForSelector('text=Welche Technologie', { timeout: 30000 });
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
 
     // ── SCHRITT 11: Technologie Aufstellung → Default Außenaufstellung ───────
     console.log('🏠 [11] Technologie Aufstellung...');
-    await page.waitForSelector('text=Welche Technologie', { timeout: 20000 });
+    await page.waitForSelector('text=Welche Technologie', { timeout: 30000 });
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
 
