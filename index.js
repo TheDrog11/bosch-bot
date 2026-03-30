@@ -195,15 +195,9 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
 
-    // ── SCHRITT 11: Technologie Aufstellung → nur klicken wenn Seite da ist ──
+    // ── SCHRITT 11: Technologie Aufstellung → Default Außenaufstellung ───────
     console.log('🏠 [11] Technologie Aufstellung...');
-    await page.waitForTimeout(1500);
-    // Prüfen ob noch eine weitere Technologie-Seite kommt (bei hoher Leistung nicht immer)
-    const aufAufstellungsSeite = await page.getByRole('button', { name: 'Weiter' }).isEnabled().catch(() => false);
-    if (aufAufstellungsSeite) {
-      await page.getByRole('button', { name: 'Weiter' }).click();
-      await page.waitForTimeout(700);
-    } // Seite laden lassen
+    await page.waitForSelector('text=Welche Technologie', { timeout: 20000 });
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
 
