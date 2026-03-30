@@ -1,9 +1,11 @@
 const express = require('express');
+const cors    = require('cors');
 const { chromium } = require('playwright');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const supabase = createClient(
@@ -51,9 +53,9 @@ app.post('/api/run-advisor', async (req, res) => {
     return data.id;
   }
 
+  // ── DB: pending (vor der Antwort) ───────────────────────────────────────
+  console.log(`\n🚀 Lead: ${lead_id}`);
   try {
-    // ── DB: pending ──────────────────────────────────────────────────────────
-    console.log(`\n🚀 Lead: ${lead_id}`);
     record_id = await dbInsert({
       lead_id, triggered_by, status: 'pending',
       advisor_inputs: { plz, energieverbrauch, wohnflaeche, raumheizung,
@@ -62,7 +64,15 @@ app.post('/api/run-advisor', async (req, res) => {
       evu_sperre, gebaude_erweiterung_geplant, noise_level_filter, value_class_filter,
     });
     console.log(`🗄️  Record: ${record_id}`);
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
 
+  // ── Sofort antworten — Bot läuft im Hintergrund weiter ──────────────────
+  res.status(202).json({ success: true, record_id, message: 'HPA läuft, Status via Supabase polling' });
+
+  // ── Ab hier async im Hintergrund ────────────────────────────────────────
+  try {
     browser = await chromium.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
@@ -434,24 +444,10 @@ app.post('/api/run-advisor', async (req, res) => {
     await browser.close();
     console.log(`🏁 Fertig! ${empfohlenes_produkt} → ${decision} (${beste.pct}%)`);
 
-    res.status(200).json({
-      success: true,
-      record_id,
-      produkt: empfohlenes_produkt,
-      matched_product_id_innen,
-      matched_product_id_aussen,
-      spitzenleistung_klein_pct,
-      spitzenleistung_gross_pct,
-      decision,
-      warning_message,
-      pdf_url,
-    });
-
   } catch (error) {
     console.error('💥 FEHLER:', error.message);
     if (browser) await browser.close();
     if (record_id) await dbUpdate(record_id, { status: 'error', error_message: error.message });
-    res.status(500).json({ success: false, error: error.message });
   }
 });
 
