@@ -74,12 +74,12 @@ app.post('/api/run-advisor', async (req, res) => {
 
     // Cookie Banner
     try {
-      await page.getByRole('button', { name: 'Alles akzeptieren' }).click({ timeout: 5000 });
+      await page.getByRole('button', { name: 'Alles akzeptieren' }).click({ timeout: 5000, force: true });
       await page.waitForTimeout(500);
     } catch (e) {}
 
     // Formular aktivieren + PLZ
-    await page.getByText('Straße Hausnummer').click();
+    await page.getByText('Straße Hausnummer').click({ force: true });
     await page.waitForTimeout(300);
     await page.locator('.col-md-12').click();
     await page.waitForTimeout(300);
