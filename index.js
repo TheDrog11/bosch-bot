@@ -200,17 +200,14 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
 
-    // ── SCHRITT 10b: Kompressor-Technologie (optional, nur bei ~30.300+ kWh) ─
-    // Bei hohem Verbrauch erscheint extra Frage: Inverter vs. Zweistufig
-    try {
-      await page.waitForSelector('text=Inverter', { timeout: 3000 });
-      console.log('⚡ [10b] Kompressor-Technologie: Inverter (extra Schritt erkannt)');
+    // ── SCHRITT 10b: Kompressor-Technologie (nur bei >= 30.300 kWh) ──────────
+    if (energieverbrauch >= 30300) {
+      console.log('⚡ [10b] Kompressor-Technologie: Inverter (kWh >= 30.300)');
+      await page.waitForSelector('text=Inverter', { timeout: 10000 });
       await page.getByText('Inverter', { exact: true }).click();
       await page.waitForTimeout(300);
       await page.getByRole('button', { name: 'Weiter' }).click();
       await page.waitForTimeout(700);
-    } catch (e) {
-      // Frage erscheint nicht bei niedrigem Verbrauch → normal weiter
     }
 
     // ── SCHRITT 11: Technologie Aufstellung → Default Außenaufstellung ───────
