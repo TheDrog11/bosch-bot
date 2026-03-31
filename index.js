@@ -150,7 +150,7 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('tab', { name: 'in kWh/a (Verbrauch/Jahr) ' }).click();
     await page.waitForTimeout(400);
 
-    // ✅ FIX: Checkbox nur anklicken wenn Trinkwasser über die Heizanlage läuft
+    // ✅ FIX 1: Checkbox nur anklicken wenn Trinkwasser über die Heizanlage läuft
     if (!trinkwasser.startsWith('Nein')) {
       await page.getByLabel('in kWh/a (Verbrauch/Jahr)').getByText('Heizlast ist inkl. Warmwasser').click();
       await page.waitForTimeout(300);
@@ -196,9 +196,22 @@ app.post('/api/run-advisor', async (req, res) => {
 
     // ── SCHRITT 10: Technologie Art → Default Luft/Wasser Monoblock → Weiter─
     console.log('🌬️  [10] Technologie Art...');
-    await page.waitForTimeout(1500); // Seite laden lassen
+    await page.waitForTimeout(1500);
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
+
+    // ── SCHRITT 10b: Kompressor-Technologie (optional, nur bei ~30.300+ kWh) ─
+    // Bei hohem Verbrauch erscheint extra Frage: Inverter vs. Zweistufig
+    try {
+      await page.waitForSelector('text=Inverter', { timeout: 3000 });
+      console.log('⚡ [10b] Kompressor-Technologie: Inverter (extra Schritt erkannt)');
+      await page.getByText('Inverter', { exact: true }).click();
+      await page.waitForTimeout(300);
+      await page.getByRole('button', { name: 'Weiter' }).click();
+      await page.waitForTimeout(700);
+    } catch (e) {
+      // Frage erscheint nicht bei niedrigem Verbrauch → normal weiter
+    }
 
     // ── SCHRITT 11: Technologie Aufstellung → Default Außenaufstellung ───────
     console.log('🏠 [11] Technologie Aufstellung...');
