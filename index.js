@@ -144,13 +144,18 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
 
-    // ── SCHRITT 5: Wärmebedarf → kWh/a + inkl. Warmwasser + Wert ───────────
-    console.log('⚡ [5] Wärmebedarf: ' + energieverbrauch + ' kWh/a');
+    // ── SCHRITT 5: Wärmebedarf → kWh/a + ggf. inkl. Warmwasser + Wert ───────
+    console.log('⚡ [5] Wärmebedarf: ' + energieverbrauch + ' kWh/a | Trinkwasser: ' + trinkwasser);
     await page.waitForSelector('text=Wie hoch ist der Wärmebedarf', { timeout: 20000 });
     await page.getByRole('tab', { name: 'in kWh/a (Verbrauch/Jahr) ' }).click();
     await page.waitForTimeout(400);
-    await page.getByLabel('in kWh/a (Verbrauch/Jahr)').getByText('Heizlast ist inkl. Warmwasser').click();
-    await page.waitForTimeout(300);
+
+    // ✅ FIX: Checkbox nur anklicken wenn Trinkwasser über die Heizanlage läuft
+    if (!trinkwasser.startsWith('Nein')) {
+      await page.getByLabel('in kWh/a (Verbrauch/Jahr)').getByText('Heizlast ist inkl. Warmwasser').click();
+      await page.waitForTimeout(300);
+    }
+
     await page.getByRole('textbox', { name: 'Energiebedarf' }).click({ clickCount: 3 });
     await page.getByRole('textbox', { name: 'Energiebedarf' }).type(String(energieverbrauch), { delay: 50 });
     await page.waitForTimeout(300);
@@ -216,14 +221,10 @@ app.post('/api/run-advisor', async (req, res) => {
     else if (raumheizung.includes('Heizkörper')) suffix = 'MB';
     else                                         suffix = 'M';
 
-    // csModel für Website-Klick (exakter Text auf der Produktkarte):
-    //   E  → "CS6800iAW 12 E"   (kein Leerzeichen vor AW)
-    //   MB/M → "CS6800i AW 12 MB" (Leerzeichen vor AW)
     const csModel = suffix === 'E'
       ? `CS${serie}AW 12 E`
       : `CS${serie} AW 12 ${suffix}`;
 
-    // dbModel für Supabase-Suche (model_number Spalte hat kein Leerzeichen):
     const dbModel = `CS${serie}AW 12 ${suffix}`;
     let empfohlenes_produkt = `Compress ${serie} AW + ${csModel}`;
 
@@ -231,8 +232,6 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.waitForSelector(`text=${csModel}`, { timeout: 35000 });
     await page.waitForTimeout(500);
 
-    // Kartentitel lesen um Außeneinheit zu ermitteln
-    // Titel-Format: "Compress 6800i AW AW 7 OR-S + CS6800iAW 12 MB"
     const karte = page.locator('a, div, label').filter({ hasText: csModel }).first();
     const kartenText = await karte.textContent().catch(() => '');
     const awMatch = kartenText.match(/AW\s+(\d+)\s+(OR-[ST])/);
@@ -252,12 +251,7 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.waitForSelector('button:has-text("PDF Download")', { timeout: 20000 });
     console.log('✅ Ergebnisseite geladen!');
 
-    // ── Ergebnistabelle auslesen ─────────────────────────────────────────────
-    // Strategie: Zeile "Spitzenleistungsabdeckung" finden → alle td-Werte lesen
-    // Spaltenköpfe: Zeile "Wärmepumpe" → AW-Varianten lesen
-
     const tabellenDaten = await page.evaluate(() => {
-      // Alle Tabellenzeilen durchsuchen
       const rows = Array.from(document.querySelectorAll('tr, [class*="row"], [class*="Row"]'));
 
       let spitzenLeistungWerte = [];
@@ -266,13 +260,11 @@ app.post('/api/run-advisor', async (req, res) => {
       for (const row of rows) {
         const text = row.textContent || '';
 
-        // Spaltenköpfe: Zeile die "OR-S" oder "OR-T" enthält
         if (text.includes('OR-S') || text.includes('OR-T')) {
           const cells = Array.from(row.querySelectorAll('td, th, [class*="cell"], [class*="Cell"]'));
           spaltenKoepfe = cells.map(c => c.textContent.trim()).filter(t => t.length > 0);
         }
 
-        // Spitzenleistung: Zeile die "Spitzenleistung" enthält
         if (text.includes('Spitzenleistung')) {
           const cells = Array.from(row.querySelectorAll('td, [class*="cell"], [class*="Cell"], [class*="Data"]'));
           spitzenLeistungWerte = cells
@@ -297,33 +289,25 @@ app.post('/api/run-advisor', async (req, res) => {
       return m ? `AW ${m[1]} ${m[2]}` : null;
     };
 
-    // Spalten in Reihenfolge: [ausgewaehlt/mitte, klein, gross] oder [klein, mitte, gross]
-    // Spaltenköpfe filtern auf die die "OR-" enthalten
     const awKoepfe = tabellenDaten.spaltenKoepfe.filter(t => t.includes('OR-'));
-
-    // Spitzenleistungswerte: immer 3 Werte (eine pro Spalte)
     const pctWerte = tabellenDaten.spitzenLeistungWerte.map(t => parsePct(t));
 
-    // Varianten zusammenbauen
     const varianten = awKoepfe.map((kopf, i) => ({
       aw:    extractAW(kopf),
       pct:   pctWerte[i] ?? null,
-      index: i, // 0=links, 1=mitte, 2=rechts
+      index: i,
     })).filter(v => v.pct !== null);
 
     console.log('🔍 Varianten:', varianten);
 
-    // Beste Variante: nächste zu 100%
     const beste = varianten.reduce((a, b) =>
       Math.abs(a.pct - 100) <= Math.abs(b.pct - 100) ? a : b
     );
 
-    // Aktuell ausgewählt: die Spalte mit "Ausgewählt"-Button (index der ausgewählten Spalte)
     const ausgewaehltIndex = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button'));
       const ausgewaehlt = btns.find(b => b.textContent.trim() === 'Ausgewählt');
       if (!ausgewaehlt) return 0;
-      // Spaltenindex ermitteln
       const allBtns = btns.filter(b =>
         b.textContent.trim() === 'Ausgewählt' || b.textContent.trim() === 'Produkt ändern'
       );
@@ -335,15 +319,12 @@ app.post('/api/run-advisor', async (req, res) => {
     const spitzenleistung_klein_pct = pctWerte[0] ?? null;
     const spitzenleistung_gross_pct = pctWerte[pctWerte.length - 1] ?? null;
 
-    // ── Produkt ändern falls nötig ───────────────────────────────────────────
     let finalesAW = beste.aw;
 
     if (beste.index !== ausgewaehltIndex) {
       console.log(`🔄 Wechsle zu: ${beste.aw}`);
       const produktAendernBtns = page.getByRole('button', { name: 'Produkt ändern' });
 
-      // "Produkt ändern" Buttons: links=0, rechts=1 (ausgewählt hat keinen)
-      // beste.index < ausgewaehltIndex → linker Button; sonst rechter
       if (beste.index < ausgewaehltIndex) {
         await produktAendernBtns.first().click();
       } else {
@@ -351,14 +332,10 @@ app.post('/api/run-advisor', async (req, res) => {
       }
       await page.waitForTimeout(1000);
 
-      // Zurück auf Produktauswahlseite
       console.log('⏳ Warte auf Produktauswahlseite...');
       await page.waitForSelector(`text=${csModel}`, { timeout: 35000 });
       await page.waitForTimeout(500);
 
-      // Richtige Karte klicken — exakt wie Codegen:
-      // page.getByText('Compress 6800i AWAW 7 OR-S + CS6800i AW 12 MB...').click()
-      // Wir suchen den Text der BEIDE Teile enthält: serie-Bezeichnung + AW-Variante
       console.log(`🔍 Klicke Karte: ${beste.aw} + ${csModel}`);
       await page.getByText(`Compress ${serie} AW${beste.aw} + ${csModel}`).first().click();
       await page.waitForTimeout(500);
@@ -372,7 +349,6 @@ app.post('/api/run-advisor', async (req, res) => {
       console.log('✅ Neue Ergebnisseite geladen!');
     }
 
-    // ── Decision + Warning ───────────────────────────────────────────────────
     const decision = beste.pct >= 80 && beste.pct <= 110 ? 'ok' : beste.pct > 110 ? 'ueberdimensioniert' : 'warnung';
     const warning_message = beste.pct > 110
       ? `Spitzenleistung ${beste.pct}% – Überdimensionierung prüfen`
@@ -382,38 +358,32 @@ app.post('/api/run-advisor', async (req, res) => {
 
     console.log(`🎯 Decision: ${decision} (${beste.pct}%) ${warning_message ?? ''}`);
 
-    // Finales Produkt — aus der Ergebnisseite lesen (Ausgewählt-Spalte)
-    // Nicht unser vorberechnetes csModel verwenden, sondern was Bosch tatsächlich zeigt
-    const ausgewaehlteSpalte = tabellenDaten.spaltenKoepfe.find((_, i) => i === ausgewaehltIndex) 
+    const ausgewaehlteSpalte = tabellenDaten.spaltenKoepfe.find((_, i) => i === ausgewaehltIndex)
       ?? tabellenDaten.spaltenKoepfe[0];
-    empfohlenes_produkt = ausgewaehlteSpalte 
+    empfohlenes_produkt = ausgewaehlteSpalte
       ? `Compress ${serie} ${ausgewaehlteSpalte}`
       : `Compress ${serie} ${finalesAW} + ${csModel}`;
 
     // ── PDF Download ─────────────────────────────────────────────────────────
     console.log('📥 PDF Download...');
-
-    // "PDF Download" Button öffnet Modal
     await page.getByRole('button', { name: 'PDF Download' }).first().click();
     await page.waitForTimeout(1000);
 
-    // Produkt ist bereits ausgewählt (checked) → direkt herunterladen
     const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
     await page.getByRole('button', { name: 'Diese Empfehlung herunterladen' }).click();
     const download = await downloadPromise;
 
     console.log(`📄 PDF heruntergeladen: ${download.suggestedFilename()}`);
 
-    // PDF als Buffer einlesen
     const path = require('path');
     const fs   = require('fs');
     const tmpPath = path.join('/tmp', `bosch-hpa-${record_id}.pdf`);
     await download.saveAs(tmpPath);
     const pdfBuffer = fs.readFileSync(tmpPath);
-    fs.unlinkSync(tmpPath); // temp Datei löschen
+    fs.unlinkSync(tmpPath);
 
     // ── Supabase Storage Upload ───────────────────────────────────────────────
-    const timestamp  = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const timestamp   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const storagePath = `hpa/${lead_id}/bosch-advisor-${timestamp}.pdf`;
 
     console.log(`☁️  Upload: lead-documents/${storagePath}`);
@@ -430,14 +400,13 @@ app.post('/api/run-advisor', async (req, res) => {
       console.log('☁️  Upload OK:', uploadData.path);
     }
 
-    // Public URL generieren (signed URL für private Bucket)
     const { data: urlData } = await supabase.storage
       .from('lead-documents')
-      .createSignedUrl(storagePath, 60 * 60 * 24 * 365); // 1 Jahr gültig
+      .createSignedUrl(storagePath, 60 * 60 * 24 * 365);
 
     const pdf_url = urlData?.signedUrl ?? null;
     console.log('🔗 PDF URL:', pdf_url ? 'OK' : 'nicht verfügbar');
-    // Inneneinheit: via model_number
+
     const matched_product_id_innen = await findProductId(dbModel);
 
     let matched_product_id_aussen = null;
