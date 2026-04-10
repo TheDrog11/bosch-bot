@@ -174,7 +174,7 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
     // ── SCHRITT 10b: Kompressor-Technologie (nur bei >= 30.300 kWh) ──────────
-    if (energieverbrauch >= 30300) {
+    if (energieverbrauch >= 39150) {
       console.log('⚡ [10b] Kompressor-Technologie: Inverter (kWh >= 30.300)');
       await page.waitForSelector('text=Inverter', { timeout: 10000 });
       await page.getByText('Inverter', { exact: true }).click();
