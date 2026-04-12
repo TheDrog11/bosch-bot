@@ -47,6 +47,21 @@ app.post('/api/run-advisor', async (req, res) => {
     console.log(`✅ Produkt: ${data.name}`);
     return data.id;
   }
+  // ── Cookie-Banner Helper ───────────────────────────────────────────────────
+  // Wird nach page.goto und nach größeren Seitenübergängen aufgerufen.
+  // Versucht zuerst den Banner wegzuklicken, entfernt ihn danach hart aus dem DOM.
+  // Falls der Banner nicht da ist, passiert nichts.
+  async function dismissCookieBanner(page) {
+    try {
+      await page.getByRole('button', { name: 'Alles akzeptieren' }).click({ timeout: 3000, force: true });
+      await page.waitForTimeout(400);
+    } catch (e) {}
+    await page.evaluate(() => {
+      const el = document.querySelector('dock-privacy-settings');
+      if (el) el.remove();
+    });
+    await page.waitForTimeout(300);
+  }
   // ── Concurrency Check — nur ein Run pro Lead gleichzeitig ───────────────
   const { data: laufend } = await supabase
     .from('lead_hpa_results')
@@ -89,22 +104,15 @@ app.post('/api/run-advisor', async (req, res) => {
     // ── SCHRITT 1: Seite laden ───────────────────────────────────────────────
     await page.goto('https://bosch-de-heatpump.thernovo.com/home', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000);
-    // Cookie Banner — klicken + aus DOM entfernen damit es nichts blockiert
-    try {
-      await page.getByRole('button', { name: 'Alles akzeptieren' }).click({ timeout: 5000, force: true });
-      await page.waitForTimeout(500);
-    } catch (e) {}
-    // dock-privacy-settings komplett aus DOM entfernen (blockiert sonst alle Klicks)
-    await page.evaluate(() => {
-      const el = document.querySelector('dock-privacy-settings');
-      if (el) el.remove();
-    });
-    await page.waitForTimeout(500);
+    // FIX: Cookie-Banner via Helper entfernen (wiederverwertbar für spätere Schritte)
+    await dismissCookieBanner(page);
     // Formular aktivieren + PLZ
     await page.getByText('Straße Hausnummer').click({ force: true });
     await page.waitForTimeout(300);
     await page.locator('.col-md-12').click({ force: true });
     await page.waitForTimeout(300);
+    // FIX: Cookie-Banner nochmals entfernen — Web Component kann sich nach Interaktion neu rendern
+    await dismissCookieBanner(page);
     console.log('📍 PLZ: ' + plz);
     await page.getByRole('textbox', { name: 'PLZ *' }).click();
     await page.getByRole('textbox', { name: 'PLZ *' }).fill(String(plz));
@@ -173,9 +181,9 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.waitForTimeout(1500);
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 10b: Kompressor-Technologie (nur bei >= 30.300 kWh) ──────────
+    // ── SCHRITT 10b: Kompressor-Technologie (nur bei >= 39.150 kWh) ──────────
     if (energieverbrauch >= 39150) {
-      console.log('⚡ [10b] Kompressor-Technologie: Inverter (kWh >= 30.300)');
+      console.log('⚡ [10b] Kompressor-Technologie: Inverter (kWh >= 39.150)');
       await page.waitForSelector('text=Inverter', { timeout: 10000 });
       await page.getByText('Inverter', { exact: true }).click();
       await page.waitForTimeout(300);
@@ -187,11 +195,17 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.waitForSelector('text=Welche Technologie', { timeout: 20000 });
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 12: Distanz Schall → Default 5m → Weiter ────────────────────
-    console.log('📏 [12] Distanz Schall...');
-    await page.waitForSelector('text=Abstand', { timeout: 20000 });
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(2000);
+    // ── SCHRITT 12: Distanz Schall → optional je nach PLZ/Konfiguration ──────
+    // FIX: try/catch — dieser Schritt erscheint nicht bei jeder Konfiguration
+    console.log('📏 [12] Distanz Schall (optional)...');
+    try {
+      await page.waitForSelector('text=Abstand', { timeout: 8000 });
+      await page.getByRole('button', { name: 'Weiter' }).click();
+      console.log('📏 [12] Abstand-Schritt durchgeführt');
+      await page.waitForTimeout(2000);
+    } catch (e) {
+      console.log('📏 [12] Abstand-Schritt nicht vorhanden — übersprungen');
+    }
     // ── SCHRITT 13: Produktauswahl ───────────────────────────────────────────
     const serie         = raumheizung.includes('Heizkörper') ? '6800i' : '5800i';
     const spezVerbrauch = energieverbrauch / wohnflaeche;
@@ -348,7 +362,6 @@ app.post('/api/run-advisor', async (req, res) => {
     const matched_product_id_innen = await findProductId(dbModel);
     let matched_product_id_aussen = null;
     if (finalesAW) {
-      // FIX: serie in die Suche einbeziehen damit 5800i und 6800i nicht verwechselt werden
       const { data: aussen } = await supabase
         .from('products').select('id, name')
         .ilike('name', `%${serie} ${finalesAW}%`)
