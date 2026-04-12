@@ -62,6 +62,20 @@ app.post('/api/run-advisor', async (req, res) => {
     });
     await page.waitForTimeout(300);
   }
+  // ── Strompreis Helper ──────────────────────────────────────────────────────
+  // Immer unmittelbar vor PDF-Download aufrufen — an beiden möglichen Stellen.
+  // Wartet bis das Feld im DOM ist, tippt per keyboard.type (robuster als fill)
+  // und loggt den gesetzten Wert zur Kontrolle im Railway-Log.
+  async function setStrompreis(page) {
+    console.log('⚡ Strompreis: 0,35 → 0,28 €/kWh');
+    await page.waitForSelector('#number_electricityPrice', { timeout: 10000 });
+    await page.locator('#number_electricityPrice').click({ clickCount: 3 });
+    await page.keyboard.type('0,28', { delay: 50 });
+    await page.keyboard.press('Tab');
+    await page.waitForTimeout(1500);
+    const wert = await page.locator('#number_electricityPrice').inputValue();
+    console.log(`⚡ Strompreis gesetzt: ${wert}`);
+  }
   // ── Concurrency Check — nur ein Run pro Lead gleichzeitig ───────────────
   const { data: laufend } = await supabase
     .from('lead_hpa_results')
@@ -104,7 +118,7 @@ app.post('/api/run-advisor', async (req, res) => {
     // ── SCHRITT 1: Seite laden ───────────────────────────────────────────────
     await page.goto('https://bosch-de-heatpump.thernovo.com/home', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000);
-    // FIX: Cookie-Banner via Helper entfernen (wiederverwertbar für spätere Schritte)
+    // FIX: Cookie-Banner via Helper entfernen
     await dismissCookieBanner(page);
     // Formular aktivieren + PLZ
     await page.getByText('Straße Hausnummer').click({ force: true });
@@ -325,6 +339,10 @@ app.post('/api/run-advisor', async (req, res) => {
     empfohlenes_produkt = ausgewaehlteSpalte
       ? `Compress ${serie} ${ausgewaehlteSpalte}`
       : `Compress ${serie} ${finalesAW} + ${csModel}`;
+    // ── FIX: Strompreis 0,35 → 0,28 (Wärmepumpenstromtarif) ─────────────────
+    // Wird hier aufgerufen — nach beiden möglichen Ergebnisseiten,
+    // unmittelbar vor dem PDF-Download.
+    await setStrompreis(page);
     // ── PDF Download ─────────────────────────────────────────────────────────
     console.log('📥 PDF Download...');
     await page.getByRole('button', { name: 'PDF Download' }).first().click();
