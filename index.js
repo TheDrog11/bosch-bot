@@ -48,9 +48,6 @@ app.post('/api/run-advisor', async (req, res) => {
     return data.id;
   }
   // ── Cookie-Banner Helper ───────────────────────────────────────────────────
-  // Wird nach page.goto und nach größeren Seitenübergängen aufgerufen.
-  // Versucht zuerst den Banner wegzuklicken, entfernt ihn danach hart aus dem DOM.
-  // Falls der Banner nicht da ist, passiert nichts.
   async function dismissCookieBanner(page) {
     try {
       await page.getByRole('button', { name: 'Alles akzeptieren' }).click({ timeout: 3000, force: true });
@@ -104,14 +101,11 @@ app.post('/api/run-advisor', async (req, res) => {
     // ── SCHRITT 1: Seite laden ───────────────────────────────────────────────
     await page.goto('https://bosch-de-heatpump.thernovo.com/home', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000);
-    // FIX: Cookie-Banner via Helper entfernen
     await dismissCookieBanner(page);
-    // Formular aktivieren + PLZ
     await page.getByText('Straße Hausnummer').click({ force: true });
     await page.waitForTimeout(300);
     await page.locator('.col-md-12').click({ force: true });
     await page.waitForTimeout(300);
-    // FIX: Cookie-Banner nochmals entfernen — Web Component kann sich nach Interaktion neu rendern
     await dismissCookieBanner(page);
     console.log('📍 PLZ: ' + plz);
     await page.getByRole('textbox', { name: 'PLZ *' }).click();
@@ -134,7 +128,7 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.waitForSelector('text=Welche Temperaturen', { timeout: 20000 });
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 5: Wärmebedarf → kWh/a + ggf. inkl. Warmwasser + Wert ───────
+    // ── SCHRITT 5: Wärmebedarf ───────────────────────────────────────────────
     console.log('⚡ [5] Wärmebedarf: ' + energieverbrauch + ' kWh/a | Trinkwasser: ' + trinkwasser);
     await page.waitForSelector('text=Wie hoch ist der Wärmebedarf', { timeout: 20000 });
     await page.getByRole('tab', { name: 'in kWh/a (Verbrauch/Jahr) ' }).click();
@@ -148,14 +142,14 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.waitForTimeout(300);
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 6: Verteilsystem → Auswahl aus CRM ──────────────────────────
+    // ── SCHRITT 6: Verteilsystem ─────────────────────────────────────────────
     console.log('🔥 [6] Verteilsystem: ' + raumheizung);
     await page.waitForSelector('text=Welches Verteilsystem', { timeout: 20000 });
     await page.getByText(raumheizung, { exact: true }).click();
     await page.waitForTimeout(300);
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 7: Warmwasser Personen → aus CRM oder Default 4 ─────────────
+    // ── SCHRITT 7: Warmwasser Personen ───────────────────────────────────────
     console.log('👥 [7] Warmwasser Personen: ' + haushaltsgroesse);
     await page.waitForSelector('text=Wie viele Personen', { timeout: 20000 });
     if (haushaltsgroesse !== 4) {
@@ -166,17 +160,17 @@ app.post('/api/run-advisor', async (req, res) => {
     }
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 8: Warmwassersystem → Default Speichersystem → Weiter ───────
+    // ── SCHRITT 8: Warmwassersystem ──────────────────────────────────────────
     console.log('💧 [8] Warmwassersystem...');
     await page.waitForSelector('text=Welches Warmwassersystem', { timeout: 20000 });
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 9: Warmwassermenge → Default → Weiter ───────────────────────
+    // ── SCHRITT 9: Warmwassermenge ───────────────────────────────────────────
     console.log('🚿 [9] Warmwassermenge...');
     await page.waitForSelector('text=Warmwassermenge', { timeout: 20000 });
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 10: Technologie Art → Default Luft/Wasser Monoblock → Weiter─
+    // ── SCHRITT 10: Technologie Art ──────────────────────────────────────────
     console.log('🌬️  [10] Technologie Art...');
     await page.waitForTimeout(1500);
     await page.getByRole('button', { name: 'Weiter' }).click();
@@ -190,13 +184,12 @@ app.post('/api/run-advisor', async (req, res) => {
       await page.getByRole('button', { name: 'Weiter' }).click();
       await page.waitForTimeout(700);
     }
-    // ── SCHRITT 11: Technologie Aufstellung → Default Außenaufstellung ───────
+    // ── SCHRITT 11: Technologie Aufstellung ──────────────────────────────────
     console.log('🏠 [11] Technologie Aufstellung...');
     await page.waitForSelector('text=Welche Technologie', { timeout: 20000 });
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 12: Distanz Schall → optional je nach PLZ/Konfiguration ──────
-    // FIX: try/catch — dieser Schritt erscheint nicht bei jeder Konfiguration
+    // ── SCHRITT 12: Distanz Schall (optional) ────────────────────────────────
     console.log('📏 [12] Distanz Schall (optional)...');
     try {
       await page.waitForSelector('text=Abstand', { timeout: 8000 });
@@ -220,7 +213,12 @@ app.post('/api/run-advisor', async (req, res) => {
     const dbModel = `CS${serie}AW 12 ${suffix}`;
     let empfohlenes_produkt = `Compress ${serie} AW + ${csModel}`;
     console.log(`🧠 [13] Produkt: ${empfohlenes_produkt}`);
-    await page.waitForSelector(`text=${csModel}`, { timeout: 35000 });
+    // FIX: Cookie-Banner entfernen + state: 'attached' statt 'visible'
+    // Der Cookie-Banner (dock-privacy-settings Web Component) überlagert als
+    // transparenter Layer die Seite und blockiert den visibility-Check von
+    // Playwright — obwohl das Element im DOM vorhanden ist.
+    await dismissCookieBanner(page);
+    await page.waitForSelector(`text=${csModel}`, { state: 'attached', timeout: 35000 });
     await page.waitForTimeout(500);
     const karte = page.locator('a, div, label').filter({ hasText: csModel }).first();
     const kartenText = await karte.textContent().catch(() => '');
@@ -301,7 +299,9 @@ app.post('/api/run-advisor', async (req, res) => {
       }
       await page.waitForTimeout(1000);
       console.log('⏳ Warte auf Produktauswahlseite...');
-      await page.waitForSelector(`text=${csModel}`, { timeout: 35000 });
+      // FIX: Cookie-Banner auch hier entfernen + state: 'attached'
+      await dismissCookieBanner(page);
+      await page.waitForSelector(`text=${csModel}`, { state: 'attached', timeout: 35000 });
       await page.waitForTimeout(500);
       console.log(`🔍 Klicke Karte: ${beste.aw} + ${csModel}`);
       await page.getByText(`Compress ${serie} AW${beste.aw} + ${csModel}`).first().click();
