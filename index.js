@@ -90,6 +90,9 @@ app.post('/api/run-advisor', async (req, res) => {
   // ── Sofort antworten — Bot läuft im Hintergrund weiter ──────────────────
   res.status(202).json({ success: true, record_id, message: 'HPA läuft, Status via Supabase polling' });
   // ── Ab hier async im Hintergrund ────────────────────────────────────────
+
+  const warmwasserAktiv = !trinkwasser.startsWith('Nein');
+
   try {
     browser = await chromium.launch({
       headless: true,
@@ -129,11 +132,11 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
     // ── SCHRITT 5: Wärmebedarf ───────────────────────────────────────────────
-    console.log('⚡ [5] Wärmebedarf: ' + energieverbrauch + ' kWh/a | Trinkwasser: ' + trinkwasser);
+    console.log(`⚡ [5] Wärmebedarf: ${energieverbrauch} kWh/a | Warmwasser über WP: ${warmwasserAktiv ? 'Ja' : 'Nein'}`);
     await page.waitForSelector('text=Wie hoch ist der Wärmebedarf', { timeout: 20000 });
     await page.getByRole('tab', { name: 'in kWh/a (Verbrauch/Jahr) ' }).click();
     await page.waitForTimeout(400);
-    if (!trinkwasser.startsWith('Nein')) {
+    if (warmwasserAktiv) {
       await page.getByLabel('in kWh/a (Verbrauch/Jahr)').getByText('Heizlast ist inkl. Warmwasser').click();
       await page.waitForTimeout(300);
     }
@@ -150,26 +153,43 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
     // ── SCHRITT 7: Warmwasser Personen ───────────────────────────────────────
-    console.log('👥 [7] Warmwasser Personen: ' + haushaltsgroesse);
+    console.log(`👥 [7] Warmwasser Personen | Warmwasser über WP: ${warmwasserAktiv ? 'Ja' : 'Nein'}`);
     await page.waitForSelector('text=Wie viele Personen', { timeout: 20000 });
-    if (haushaltsgroesse !== 4) {
-      const input = page.locator('input[type="number"], input[name*="person"], input[name*="Person"]').first();
-      await input.click({ clickCount: 3 });
-      await input.type(String(haushaltsgroesse), { delay: 50 });
+
+    if (!warmwasserAktiv) {
+      // ── Kein Warmwasser über WP → Button klicken, Schritte 8+9 entfallen ──
+      console.log('🚫 [7] Kein Warmwasser — klicke "Kein Warmwasser. Nur Heizung."');
+      await page.getByText('Kein Warmwasser. Nur Heizung.').click();
       await page.waitForTimeout(300);
+    } else {
+      // ── Warmwasser aktiv → Personenanzahl setzen ──
+      if (haushaltsgroesse !== 4) {
+        const input = page.locator('input[type="number"], input[name*="person"], input[name*="Person"]').first();
+        await input.click({ clickCount: 3 });
+        await input.type(String(haushaltsgroesse), { delay: 50 });
+        await page.waitForTimeout(300);
+      }
     }
+
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(700);
-    // ── SCHRITT 8: Warmwassersystem ──────────────────────────────────────────
-    console.log('💧 [8] Warmwassersystem...');
-    await page.waitForSelector('text=Welches Warmwassersystem', { timeout: 20000 });
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
-    // ── SCHRITT 9: Warmwassermenge ───────────────────────────────────────────
-    console.log('🚿 [9] Warmwassermenge...');
-    await page.waitForSelector('text=Warmwassermenge', { timeout: 20000 });
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+
+    // ── SCHRITT 8 + 9: Nur wenn Warmwasser über WP ──────────────────────────
+    if (warmwasserAktiv) {
+      // ── SCHRITT 8: Warmwassersystem ──────────────────────────────────────
+      console.log('💧 [8] Warmwassersystem...');
+      await page.waitForSelector('text=Welches Warmwassersystem', { timeout: 20000 });
+      await page.getByRole('button', { name: 'Weiter' }).click();
+      await page.waitForTimeout(700);
+      // ── SCHRITT 9: Warmwassermenge ───────────────────────────────────────
+      console.log('🚿 [9] Warmwassermenge...');
+      await page.waitForSelector('text=Warmwassermenge', { timeout: 20000 });
+      await page.getByRole('button', { name: 'Weiter' }).click();
+      await page.waitForTimeout(700);
+    } else {
+      console.log('⏭️  [8+9] Übersprungen (kein Warmwasser)');
+    }
+
     // ── SCHRITT 10: Technologie Art ──────────────────────────────────────────
     console.log('🌬️  [10] Technologie Art...');
     await page.waitForTimeout(1500);
