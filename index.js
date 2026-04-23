@@ -220,19 +220,24 @@ app.post('/api/run-advisor', async (req, res) => {
       console.log('📏 [12] Abstand-Schritt nicht vorhanden — übersprungen');
     }
     // ── SCHRITT 13: Produktauswahl ───────────────────────────────────────────
-    const serie         = raumheizung.includes('Heizkörper') ? '6800i' : '5800i';
-    const spezVerbrauch = energieverbrauch / wohnflaeche;
-    const platzmangel   = (deckenhoehe_hwr < 235) || (spezVerbrauch > 150);
+    const serie = raumheizung.includes('Heizkörper') ? '6800i' : '5800i';
+
+    // Suffix-Logik:
+    // - Heizkörper (auch HK+FB Kombi) → immer MB
+    // - Fußbodenheizung + Deckenhöhe >= 235 → M
+    // - Fußbodenheizung + Deckenhöhe < 235 → MB (M passt nicht)
+    // - E wird nie gewählt
     let suffix;
-    if (platzmangel)                             suffix = 'E';
-    else if (raumheizung.includes('Heizkörper')) suffix = 'MB';
-    else                                         suffix = 'M';
-    const csModel = suffix === 'E'
-      ? `CS${serie}AW 12 E`
-      : `CS${serie} AW 12 ${suffix}`;
+    if (raumheizung.includes('Heizkörper')) {
+      suffix = 'MB';
+    } else {
+      suffix = deckenhoehe_hwr >= 235 ? 'M' : 'MB';
+    }
+
+    const csModel = `CS${serie} AW 12 ${suffix}`;
     const dbModel = `CS${serie}AW 12 ${suffix}`;
     let empfohlenes_produkt = `Compress ${serie} AW + ${csModel}`;
-    console.log(`🧠 [13] Produkt: ${empfohlenes_produkt}`);
+    console.log(`🧠 [13] Produkt: ${empfohlenes_produkt} (Suffix: ${suffix}, Deckenhöhe: ${deckenhoehe_hwr}cm)`);
     // FIX: Cookie-Banner entfernen + state: 'attached' statt 'visible'
     // Der Cookie-Banner (dock-privacy-settings Web Component) überlagert als
     // transparenter Layer die Seite und blockiert den visibility-Check von
