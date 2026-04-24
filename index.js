@@ -298,9 +298,29 @@ app.post('/api/run-advisor', async (req, res) => {
       index: i,
     })).filter(v => v.pct !== null);
     console.log('🔍 Varianten:', varianten);
-    const beste = varianten.reduce((a, b) =>
+    let beste = varianten.reduce((a, b) =>
       Math.abs(a.pct - 100) <= Math.abs(b.pct - 100) ? a : b
     );
+
+    // ── Warmwasser + 4KW → 5KW Upgrade ──────────────────────────────────────
+    // Wenn Warmwasser aktiv ist und die Spitzenleistung-Logik AW 4 wählt,
+    // wird stattdessen AW 5 genommen (AW 4 reicht nicht für Warmwasser).
+    if (warmwasserAktiv && beste.aw) {
+      const awSizeMatch = beste.aw.match(/AW\s+(\d+)/);
+      if (awSizeMatch && parseInt(awSizeMatch[1]) === 4) {
+        const upgrade = varianten.find(v => {
+          const m = v.aw?.match(/AW\s+(\d+)/);
+          return m && parseInt(m[1]) === 5;
+        });
+        if (upgrade) {
+          console.log(`🔺 Warmwasser-Upgrade: ${beste.aw} (${beste.pct}%) → ${upgrade.aw} (${upgrade.pct}%) — AW 4 bei Warmwasser nicht erlaubt`);
+          beste = upgrade;
+        } else {
+          console.warn(`⚠️ Warmwasser-Upgrade: AW 4 erkannt, aber keine AW 5 Variante in Ergebnistabelle — bleibe bei ${beste.aw}`);
+        }
+      }
+    }
+
     const ausgewaehltIndex = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button'));
       const ausgewaehlt = btns.find(b => b.textContent.trim() === 'Ausgewählt');
@@ -328,8 +348,9 @@ app.post('/api/run-advisor', async (req, res) => {
       await dismissCookieBanner(page);
       await page.waitForSelector(`text=${csModel}`, { state: 'attached', timeout: 35000 });
       await page.waitForTimeout(500);
+      // FIX: beste.aw enthält bereits "AW 5 OR-S", nicht nochmal "AW" voranstellen
       console.log(`🔍 Klicke Karte: ${beste.aw} + ${csModel}`);
-      await page.getByText(`Compress ${serie} AW${beste.aw} + ${csModel}`).first().click();
+      await page.getByText(`Compress ${serie} ${beste.aw} + ${csModel}`).first().click();
       await page.waitForTimeout(500);
       await page.getByRole('button', { name: 'Weiter' }).click();
       await page.waitForTimeout(2000);
@@ -345,10 +366,10 @@ app.post('/api/run-advisor', async (req, res) => {
       ? `Spitzenleistung ${beste.pct}% – unter 80%, manuelle Prüfung empfohlen`
       : null;
     console.log(`🎯 Decision: ${decision} (${beste.pct}%) ${warning_message ?? ''}`);
-    const ausgewaehlteSpalte = tabellenDaten.spaltenKoepfe.find((_, i) => i === ausgewaehltIndex)
-      ?? tabellenDaten.spaltenKoepfe[0];
-    empfohlenes_produkt = ausgewaehlteSpalte
-      ? `Compress ${serie} ${ausgewaehlteSpalte}`
+    // FIX: empfohlenes_produkt basiert auf beste.index (nach Upgrade), nicht auf ausgewaehltIndex (vor Upgrade)
+    const besteSpalte = awKoepfe[beste.index] ?? null;
+    empfohlenes_produkt = besteSpalte
+      ? `Compress ${serie} ${besteSpalte}`
       : `Compress ${serie} ${finalesAW} + ${csModel}`;
     // ── PDF Download ─────────────────────────────────────────────────────────
     console.log('📥 PDF Download...');
