@@ -222,6 +222,22 @@ app.post('/api/run-advisor', async (req, res) => {
     // ── SCHRITT 13: Produktauswahl ───────────────────────────────────────────
     const serie = raumheizung.includes('Heizkörper') ? '6800i' : '5800i';
 
+    // ── SCHRITT 13a: Außeneinheit waehlen (1. Stufe der neuen Produktauswahl) ──
+    console.log(`🌳 [13a] Außeneinheit-Stufe: Serie ${serie}`);
+    await dismissCookieBanner(page);
+    // Kältemittel R290 ist Standard, defensiv sicherstellen:
+    await page.getByText('Natürliches Kältemittel (R290)')
+      .click({ force: true }).catch(() => {});
+    await page.waitForTimeout(500);
+    // Passende Außeneinheit-Karte anklicken (Klick auf die Karte waehlt sie aus)
+    const awKarte = page.getByText(new RegExp(`Compress\\s+${serie}\\s+AW`, 'i')).first();
+    await awKarte.waitFor({ state: 'visible', timeout: 20000 });
+    await awKarte.click({ force: true });
+    await page.waitForTimeout(500);
+    await page.getByRole('button', { name: 'Weiter' }).click();
+    await page.waitForTimeout(2000);
+    console.log('🌳 [13a] Außeneinheit gewählt, weiter zur Inneneinheit');
+
     // Suffix-Logik:
     // - Heizkörper (auch HK+FB Kombi) → immer MB
     // - Fußbodenheizung + Deckenhöhe >= 235 → M
@@ -243,14 +259,15 @@ app.post('/api/run-advisor', async (req, res) => {
     // transparenter Layer die Seite und blockiert den visibility-Check von
     // Playwright — obwohl das Element im DOM vorhanden ist.
     await dismissCookieBanner(page);
-    await page.waitForSelector(`text=${csModel}`, { state: 'attached', timeout: 35000 });
+    const csRegex = new RegExp(`CS\\s*${serie}\\s*AW\\s*12\\s*${suffix}\\b`, 'i');
+    const karte = page.locator('a, div, label').filter({ hasText: csRegex }).first();
+    await karte.waitFor({ state: 'attached', timeout: 35000 });
     await page.waitForTimeout(500);
-    const karte = page.locator('a, div, label').filter({ hasText: csModel }).first();
     const kartenText = await karte.textContent().catch(() => '');
     const awMatch = kartenText.match(/AW\s+(\d+)\s+(OR-[ST])/);
     const aussenBezeichnung = awMatch ? `${serie} AW ${awMatch[1]} ${awMatch[2]}` : null;
     console.log(`🔍 Außeneinheit erkannt: ${aussenBezeichnung ?? 'nicht gefunden'}`);
-    await page.getByText(csModel).first().click();
+    await page.getByText(csRegex).first().click();
     await page.waitForTimeout(800);
     const weiterProdukt = page.getByRole('button', { name: 'Weiter' });
     await weiterProdukt.waitFor({ state: 'visible', timeout: 20000 });
