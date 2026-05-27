@@ -332,28 +332,17 @@ app.post('/api/run-advisor', async (req, res) => {
     const spitzenleistung_gross_pct = pctWerte[pctWerte.length - 1] ?? null;
     let finalesAW = beste.aw;
     if (beste.index !== ausgewaehltIndex) {
-      console.log(`🔄 Wechsle zu: ${beste.aw}`);
+      // NEU: Bosch wechselt die Variante jetzt INLINE auf der Ergebnisseite.
+      // Kein Zurueck zur Inneneinheit, kein Weiter, keine neue Ergebnisseite mehr.
+      console.log(`🔄 Wechsle inline zu: ${beste.aw}`);
       const produktAendernBtns = page.getByRole('button', { name: 'Produkt ändern' });
       if (beste.index < ausgewaehltIndex) {
         await produktAendernBtns.first().click();
       } else {
         await produktAendernBtns.last().click();
       }
-      await page.waitForTimeout(1000);
-      console.log('⏳ Warte auf Produktauswahlseite...');
-      // FIX: Cookie-Banner auch hier entfernen + state: 'attached'
-      await dismissCookieBanner(page);
-      await page.waitForSelector(`text=${csModel}`, { state: 'attached', timeout: 35000 });
-      await page.waitForTimeout(500);
-      console.log(`🔍 Klicke Karte: ${beste.aw} + ${csModel}`);
-      await page.getByText(`Compress ${serie} AW${beste.aw} + ${csModel}`).first().click();
-      await page.waitForTimeout(500);
-      await page.getByRole('button', { name: 'Weiter' }).click();
-      await page.waitForTimeout(2000);
-      await page.waitForTimeout(2000);
-      console.log('📊 Warte auf neue Ergebnisseite...');
-      await page.waitForSelector('button:has-text("PDF Download")', { timeout: 20000 });
-      console.log('✅ Neue Ergebnisseite geladen!');
+      await page.waitForTimeout(1500);
+      console.log('✅ Variante inline gewechselt');
     }
     const decision = beste.pct >= 80 && beste.pct <= 110 ? 'ok' : beste.pct > 110 ? 'ueberdimensioniert' : 'warnung';
     const warning_message = beste.pct > 110
@@ -362,8 +351,7 @@ app.post('/api/run-advisor', async (req, res) => {
       ? `Spitzenleistung ${beste.pct}% – unter 80%, manuelle Prüfung empfohlen`
       : null;
     console.log(`🎯 Decision: ${decision} (${beste.pct}%) ${warning_message ?? ''}`);
-    const ausgewaehlteSpalte = tabellenDaten.spaltenKoepfe.find((_, i) => i === ausgewaehltIndex)
-      ?? tabellenDaten.spaltenKoepfe[0];
+    const ausgewaehlteSpalte = awKoepfe[beste.index] ?? null;
     empfohlenes_produkt = ausgewaehlteSpalte
       ? `Compress ${serie} ${ausgewaehlteSpalte}`
       : `Compress ${serie} ${finalesAW} + ${csModel}`;
