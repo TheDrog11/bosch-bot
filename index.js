@@ -334,13 +334,14 @@ app.post('/api/run-advisor', async (req, res) => {
     if (beste.index !== ausgewaehltIndex) {
       // NEU: Bosch wechselt die Variante jetzt INLINE auf der Ergebnisseite.
       // Kein Zurueck zur Inneneinheit, kein Weiter, keine neue Ergebnisseite mehr.
-      console.log(`🔄 Wechsle inline zu: ${beste.aw}`);
-      const produktAendernBtns = page.getByRole('button', { name: 'Produkt ändern' });
-      if (beste.index < ausgewaehltIndex) {
-        await produktAendernBtns.first().click();
-      } else {
-        await produktAendernBtns.last().click();
-      }
+      console.log(`🔄 Wechsle inline zu: ${beste.aw} (Spalte ${beste.index})`);
+      // Gezielte Spaltenwahl: alle Varianten-Buttons in Spalten-Reihenfolge
+      // (Ausgewählt + Produkt ändern), dann den an Position beste.index klicken.
+      // Robust fuer beliebig viele Varianten, nicht nur zwei.
+      const variantenBtns = page.getByRole('button', { name: /^(Ausgewählt|Produkt ändern)$/ });
+      const btnCount = await variantenBtns.count();
+      console.log(`🔢 Varianten-Buttons: ${btnCount} | Ziel-Spalte: ${beste.index}`);
+      await variantenBtns.nth(beste.index).click();
       await page.waitForTimeout(1500);
       console.log('✅ Variante inline gewechselt');
     }
