@@ -1,127 +1,17 @@
 const express = require('express');
 const cors    = require('cors');
-const crypto  = require('crypto');
 const { chromium } = require('playwright');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// ── Hardened bot instance (Option B, staging/rebuild) ─────────────────────────
-// This bot holds NO Supabase service-role key and performs ZERO direct DB/Storage
-// calls. It authenticates inbound requests with a shared Bearer secret, runs the
-// Bosch advisor, and POSTs the result back to the auraos server-mediated callback
-// (which owns the service-role write). See cluster spec §0/§0.1/§3.2/§3.2b/§6.
-
-// ── Config / env (no secrets logged, ever) ────────────────────────────────────
-const WEBHOOK_SECRET = process.env.BOSCH_BOT_WEBHOOK_SECRET || '';
-const CALLBACK_URL   = process.env.AURAOS_CALLBACK_URL || '';
-// AURAOS_PDF_URL is optional: if unset, derive it from the callback origin.
-const PDF_URL = process.env.AURAOS_PDF_URL || derivePdfUrl(CALLBACK_URL);
-const CALLBACK_TIMEOUT_MS = 15000;
-
-/** Derive the PDF endpoint from the callback origin when AURAOS_PDF_URL is unset. */
-function derivePdfUrl(callbackUrl) {
-  if (!callbackUrl) return '';
-  try {
-    return new URL('/api/internal/bosch-planer-pdf', callbackUrl).toString();
-  } catch (e) {
-    return '';
-  }
-}
-
-// ── Inbound auth: constant-time Bearer compare, fail-closed ───────────────────
-/**
- * Constant-time compare of the inbound Bearer token against the configured secret.
- * Fail-closed: if the env secret is unset/empty -> false (every request rejected).
- * Both sides are sha256-normalized to a fixed 32-byte length so timingSafeEqual
- * never throws on a length mismatch and never leaks length via timing.
- * The secret is never logged.
- */
-function isAuthorized(req) {
-  if (!WEBHOOK_SECRET) return false; // fail closed — no secret configured
-  const header = req.get('authorization') || '';
-  const presented = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
-  if (!presented) return false;
-  const a = crypto.createHash('sha256').update(presented, 'utf8').digest();
-  const b = crypto.createHash('sha256').update(WEBHOOK_SECRET, 'utf8').digest();
-  return crypto.timingSafeEqual(a, b);
-}
-
-// ── Outbound result callback (auraos owns the DB write) ───────────────────────
-/**
- * POST a result payload to the auraos callback with the shared Bearer secret.
- * Best-effort: failures are logged (status only, never the secret) and never crash
- * the run. Uses a 15s AbortSignal timeout so a hung callback cannot stall the bot.
- */
-async function sendCallback(payload) {
-  if (!CALLBACK_URL) {
-    console.warn('⚠️  AURAOS_CALLBACK_URL unset — skipping callback');
-    return;
-  }
-  try {
-    const res = await fetch(CALLBACK_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${WEBHOOK_SECRET}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      console.error(`⚠️  Callback non-2xx: ${res.status} (status=${payload.status})`);
-    } else {
-      console.log(`📡 Callback OK: ${res.status} (status=${payload.status})`);
-    }
-  } catch (e) {
-    // Never log the secret; status/message only.
-    console.error(`⚠️  Callback failed (status=${payload.status}):`, e.message);
-  }
-}
-
-/**
- * Upload the recommendation PDF bytes to the auraos PDF endpoint (Ruling b). The bot
- * no longer holds Storage access; auraos uploads + signs + stamps pdf_url server-side.
- * Best-effort: a failure is logged and never crashes the run. result_id/lead_id go as
- * query params; the body is the raw PDF (application/pdf).
- */
-async function uploadPdf(pdfBuffer, { result_id, lead_id }) {
-  if (!PDF_URL) {
-    console.warn('⚠️  AURAOS_PDF_URL unset and not derivable — skipping PDF upload');
-    return;
-  }
-  try {
-    const url = new URL(PDF_URL);
-    if (result_id) url.searchParams.set('result_id', result_id);
-    if (lead_id) url.searchParams.set('lead_id', lead_id);
-    const res = await fetch(url.toString(), {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${WEBHOOK_SECRET}`,
-        'Content-Type': 'application/pdf',
-      },
-      body: pdfBuffer,
-      signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
-    });
-    if (!res.ok) {
-      console.error(`⚠️  PDF upload non-2xx: ${res.status}`);
-    } else {
-      console.log(`📄 PDF upload OK: ${res.status}`);
-    }
-  } catch (e) {
-    // Never log the secret; status/message only.
-    console.error('⚠️  PDF upload failed:', e.message);
-  }
-}
-
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 app.post('/api/run-advisor', async (req, res) => {
-  // ── Inbound auth FIRST — before reading the body or launching anything ───────
-  if (!isAuthorized(req)) {
-    return res.status(401).json({ success: false, error: 'Unauthorized' });
-  }
-
-  const { lead_id, triggered_by = null, inputs = {}, result_id = null } = req.body || {};
+  const { lead_id, triggered_by = null, inputs } = req.body;
   const {
     plz                         = '10405',
     energieverbrauch            = 23000,
@@ -136,14 +26,27 @@ app.post('/api/run-advisor', async (req, res) => {
     value_class_filter          = '5000',
   } = inputs;
   let browser;
-  let done = false; // guards against a contradictory error callback after success
-
-  const advisor_inputs = {
-    plz, energieverbrauch, wohnflaeche, raumheizung, haushaltsgroesse,
-    deckenhoehe_hwr, evu_sperre, gebaude_erweiterung_geplant,
-    noise_level_filter, value_class_filter,
-  };
-
+  let record_id = null;
+  // ── Supabase Helpers ───────────────────────────────────────────────────────
+  async function dbInsert(fields) {
+    const { data, error } = await supabase
+      .from('lead_hpa_results').insert(fields).select('id').single();
+    if (error) throw new Error(`DB Insert Fehler: ${error.message}`);
+    return data.id;
+  }
+  async function dbUpdate(id, fields) {
+    const { error } = await supabase
+      .from('lead_hpa_results').update(fields).eq('id', id);
+    if (error) console.error(`DB Update Fehler: ${error.message}`);
+  }
+  async function findProductId(csModel) {
+    const { data } = await supabase
+      .from('products').select('id, name')
+      .ilike('model_number', `%${csModel}%`).limit(1).single();
+    if (!data) { console.warn(`⚠️ Kein Produkt für: ${csModel}`); return null; }
+    console.log(`✅ Produkt: ${data.name}`);
+    return data.id;
+  }
   // ── Cookie-Banner Helper ───────────────────────────────────────────────────
   async function dismissCookieBanner(page) {
     try {
@@ -156,22 +59,39 @@ app.post('/api/run-advisor', async (req, res) => {
     });
     await page.waitForTimeout(300);
   }
+  // ── Concurrency Check — nur ein Run pro Lead gleichzeitig ───────────────
+  const { data: laufend } = await supabase
+    .from('lead_hpa_results')
+    .select('id')
+    .eq('lead_id', lead_id)
+    .in('status', ['pending', 'running'])
+    .limit(1);
+  if (laufend && laufend.length > 0) {
+    return res.status(409).json({
+      success: false,
+      error: 'Ein HPA-Lauf für diesen Lead läuft bereits.',
+      record_id: laufend[0].id,
+    });
+  }
+  // ── DB: pending (vor der Antwort) ───────────────────────────────────────
+  console.log(`\n🚀 Lead: ${lead_id}`);
+  try {
+    record_id = await dbInsert({
+      lead_id, triggered_by, status: 'pending',
+      advisor_inputs: { plz, energieverbrauch, wohnflaeche, raumheizung,
+        haushaltsgroesse, deckenhoehe_hwr, evu_sperre,
+        gebaude_erweiterung_geplant, noise_level_filter, value_class_filter },
+      evu_sperre, gebaude_erweiterung_geplant, noise_level_filter, value_class_filter,
+    });
+    console.log(`🗄️  Record: ${record_id}`);
+  } catch (e) {
+    return res.status(500).json({ success: false, error: e.message });
+  }
+  // ── Sofort antworten — Bot läuft im Hintergrund weiter ──────────────────
+  res.status(202).json({ success: true, record_id, message: 'HPA läuft, Status via Supabase polling' });
+  // ── Ab hier async im Hintergrund ────────────────────────────────────────
 
-  // ── Respond immediately — the advisor runs in the background ────────────────
-  // result_id is echoed back (passthrough §0.1 Q2 / contract item 5). The trigger
-  // already created the pending row; the bot no longer touches the DB.
-  console.log(`\n🚀 Lead: ${lead_id} | result_id: ${result_id ?? '(none)'}`);
-  res.status(202).json({
-    success: true,
-    result_id,
-    message: 'HPA läuft, Status via auraos-Callback',
-  });
-  // ── From here on: async in the background ────────────────────────────────────
-
-  const warmwasserAktiv = !String(trinkwasser).startsWith('Nein');
-
-  // Optional interim "running" callback (the terminal one is mandatory).
-  await sendCallback({ result_id, lead_id, triggered_by, status: 'running' });
+  const warmwasserAktiv = !trinkwasser.startsWith('Nein');
 
   try {
     browser = await chromium.launch({
@@ -180,6 +100,7 @@ app.post('/api/run-advisor', async (req, res) => {
     });
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
+    await dbUpdate(record_id, { status: 'running' });
     // ── SCHRITT 1: Seite laden ───────────────────────────────────────────────
     await page.goto('https://bosch-de-heatpump.thernovo.com/home', { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2000);
@@ -330,8 +251,6 @@ app.post('/api/run-advisor', async (req, res) => {
     }
 
     const csModel = `CS${serie} AW 12 ${suffix}`;
-    // dbModel is the Innen model STRING the callback resolves to products.model_number
-    // (Q5=b: bot stays DB-free and ships a name/model string, not a uuid).
     const dbModel = `CS${serie}AW 12 ${suffix}`;
     let empfohlenes_produkt = `Compress ${serie} AW + ${csModel}`;
     console.log(`🧠 [13] Produkt: ${empfohlenes_produkt} (Suffix: ${suffix}, Deckenhöhe: ${deckenhoehe_hwr}cm)`);
@@ -437,9 +356,6 @@ app.post('/api/run-advisor', async (req, res) => {
     empfohlenes_produkt = ausgewaehlteSpalte
       ? `Compress ${serie} ${ausgewaehlteSpalte}`
       : `Compress ${serie} ${finalesAW} + ${csModel}`;
-    // matched_product_id_aussen carries the aussen MODEL string (Q5=b); the callback
-    // resolves it to products.id via name ILIKE. (alt: `Compress ${serie} ${finalesAW}`)
-    const aussenModelString = finalesAW ? `Compress ${serie} ${finalesAW}` : null;
     // ── PDF Download ─────────────────────────────────────────────────────────
     console.log('📥 PDF Download...');
     await page.getByRole('button', { name: 'PDF Download' }).first().click();
@@ -450,59 +366,62 @@ app.post('/api/run-advisor', async (req, res) => {
     console.log(`📄 PDF heruntergeladen: ${download.suggestedFilename()}`);
     const path = require('path');
     const fs   = require('fs');
-    const tmpPath = path.join('/tmp', `bosch-hpa-${result_id ?? lead_id ?? 'run'}.pdf`);
+    const tmpPath = path.join('/tmp', `bosch-hpa-${record_id}.pdf`);
     await download.saveAs(tmpPath);
     const pdfBuffer = fs.readFileSync(tmpPath);
     fs.unlinkSync(tmpPath);
-    // ── PDF Upload (Ruling b): POST bytes to auraos, which uploads + signs ─────
-    // Best-effort — a PDF failure must not block the completed result.
-    await uploadPdf(pdfBuffer, { result_id, lead_id });
-
-    // ── Close the browser BEFORE the completed callback (contract item 6) ──────
-    // A post-success browser.close() failure must NOT emit a contradictory error
-    // callback, so close first (swallowing any error) and set the done flag.
-    await browser.close().catch(() => {});
-    done = true;
-
-    // ── Completed callback: pdf_url stays null — the PDF endpoint sets it ──────
-    // server-side (decoupled, Ruling b). matched_product_id_* carry MODEL STRINGS
-    // (Q5=b); the callback resolves them to products.id.
-    await sendCallback({
-      result_id,
-      lead_id,
-      triggered_by,
+    // ── Supabase Storage Upload ───────────────────────────────────────────────
+    const timestamp   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const storagePath = `hpa/${lead_id}/bosch-advisor-${timestamp}.pdf`;
+    console.log(`☁️  Upload: lead-documents/${storagePath}`);
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('lead-documents')
+      .upload(storagePath, pdfBuffer, {
+        contentType: 'application/pdf',
+        upsert: true,
+      });
+    if (uploadError) {
+      console.error('⚠️  Storage Upload Fehler:', uploadError.message);
+    } else {
+      console.log('☁️  Upload OK:', uploadData.path);
+    }
+    const { data: urlData } = await supabase.storage
+      .from('lead-documents')
+      .createSignedUrl(storagePath, 60 * 60 * 24 * 365);
+    const pdf_url = urlData?.signedUrl ?? null;
+    console.log('🔗 PDF URL:', pdf_url ? 'OK' : 'nicht verfügbar');
+    const matched_product_id_innen = await findProductId(dbModel);
+    let matched_product_id_aussen = null;
+    if (finalesAW) {
+      const { data: aussen } = await supabase
+        .from('products').select('id, name')
+        .ilike('name', `%${serie} ${finalesAW}%`)
+        .limit(1).single();
+      if (aussen) {
+        matched_product_id_aussen = aussen.id;
+        console.log(`✅ Außeneinheit: ${aussen.name}`);
+      } else {
+        console.warn(`⚠️ Außeneinheit nicht gefunden: ${serie} ${finalesAW}`);
+      }
+    }
+    await dbUpdate(record_id, {
       status: 'completed',
       empfohlenes_produkt,
-      matched_product_id_innen: dbModel,
-      matched_product_id_aussen: aussenModelString,
+      matched_product_id_innen,
+      matched_product_id_aussen,
       spitzenleistung_klein_pct,
       spitzenleistung_gross_pct,
       decision,
       warning_message,
-      error_message: null,
-      pdf_url: null,
-      advisor_inputs,
-      evu_sperre,
-      gebaude_erweiterung_geplant,
-      noise_level_filter,
-      value_class_filter,
+      pdf_url,
     });
+    console.log('🗄️  Supabase: completed ✅');
+    await browser.close();
     console.log(`🏁 Fertig! ${empfohlenes_produkt} → ${decision} (${beste.pct}%)`);
   } catch (error) {
     console.error('💥 FEHLER:', error.message);
-    if (browser) await browser.close().catch(() => {});
-    // Guard: if we already completed successfully, do NOT emit a contradictory
-    // error callback (a late browser.close() failure must not flip the result).
-    if (!done) {
-      await sendCallback({
-        result_id,
-        lead_id,
-        triggered_by,
-        status: 'error',
-        error_message: error.message,
-        advisor_inputs,
-      });
-    }
+    if (browser) await browser.close();
+    if (record_id) await dbUpdate(record_id, { status: 'error', error_message: error.message });
   }
 });
 const PORT = process.env.PORT || 3000;
