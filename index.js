@@ -277,84 +277,153 @@ app.post('/api/run-advisor', async (req, res) => {
     console.log('📊 Warte auf Ergebnisseite...');
     await page.waitForSelector('button:has-text("PDF Download")', { timeout: 20000 });
     console.log('✅ Ergebnisseite geladen!');
+    // ══════════════════════════════════════════════════════════════════════════
+    // ENTSCHEIDUNG: Wärmepumpenabdeckung (%), Ziel möglichst nah an 100 %.
+    // Bosch-Ergebnisseite umgebaut: Tabelle #performance-data-table ist vertikal,
+    // drei feste Spalten über CSS-Klassen: smallerBundle / defaultBundle / biggerBundle.
+    // Die ausgewählte Spalte trägt zusätzlich App__SelectedBundleBKG.
+    // Kopfzeile (Label "Wärmepumpe") enthält pro Spalte "AW <n> OR-x + CS...".
+    // Abdeckungs-Zeile (Label "Wärmepumpenabdeckung") enthält pro Spalte den %-Wert;
+    // eine unterdimensionierte Spalte trägt in der Zelle ein BoschAlertWarningIcon.
+    // ══════════════════════════════════════════════════════════════════════════
     const tabellenDaten = await page.evaluate(() => {
-      const rows = Array.from(document.querySelectorAll('tr, [class*="row"], [class*="Row"]'));
-      let spitzenLeistungWerte = [];
-      let spaltenKoepfe = [];
-      for (const row of rows) {
-        const text = row.textContent || '';
-        if (text.includes('OR-S') || text.includes('OR-T')) {
-          const cells = Array.from(row.querySelectorAll('td, th, [class*="cell"], [class*="Cell"]'));
-          spaltenKoepfe = cells.map(c => c.textContent.trim()).filter(t => t.length > 0);
-        }
-        if (text.includes('Spitzenleistung')) {
-          const cells = Array.from(row.querySelectorAll('td, [class*="cell"], [class*="Cell"], [class*="Data"]'));
-          spitzenLeistungWerte = cells
-            .map(c => c.textContent.trim())
-            .filter(t => t.includes('%') && !t.includes('Spitzenleistung'));
-        }
+      const norm = (s) => (s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+      const POS = [
+        { key: 'smaller', cls: 'smallerBundlePerformanceData' },
+        { key: 'default', cls: 'defaultBundlePerformanceData' },
+        { key: 'bigger',  cls: 'biggerBundlePerformanceData'  },
+      ];
+
+      const table = document.querySelector('#performance-data-table');
+      if (!table) return { fehlt: 'tabelle', debugHtml: (document.body?.outerHTML || '').slice(0, 8000) };
+
+      const rows = Array.from(table.querySelectorAll('tr'));
+      // Zeile finden, deren erste Zelle (Label) einen bestimmten Text enthält.
+      const findRow = (label) => rows.find((r) => {
+        const firstTd = r.querySelector('td');
+        return firstTd && norm(firstTd.textContent).startsWith(label);
+      });
+
+      const kopfRow      = findRow('Wärmepumpe');            // Produktnamen / AW-Bezeichnung
+      const abdeckungRow = findRow('Wärmepumpenabdeckung');  // %-Werte + evtl. Warn-Icon
+
+      const zelleFuer = (row, cls) =>
+        row ? row.querySelector(`td[class*="${cls}"]`) : null;
+
+      const spalten = POS.map(({ key, cls }) => {
+        const kopfTd = zelleFuer(kopfRow, cls);
+        const abTd   = zelleFuer(abdeckungRow, cls);
+        return {
+          position:      key,
+          vorhanden:     !!(kopfTd || abTd),
+          bezeichnung:   kopfTd ? norm(kopfTd.textContent) : null,
+          abdeckungText: abTd ? norm(abTd.textContent) : null,
+          hatWarnung:    !!(abTd && abTd.querySelector('[class*="BoschAlertWarningIcon"]')),
+          istAusgewaehlt:!!(kopfTd && /SelectedBundleBKG/.test(kopfTd.className))
+                        || !!(abTd && /SelectedBundleBKG/.test(abTd.className)),
+        };
+      }).filter(s => s.vorhanden);
+
+      let debugHtml = null;
+      if (!kopfRow || !abdeckungRow || spalten.length === 0) {
+        debugHtml = table.outerHTML.slice(0, 8000);
       }
-      return { spitzenLeistungWerte, spaltenKoepfe };
+      return { spalten, debugHtml };
     });
-    console.log('📋 Spaltenköpfe:', tabellenDaten.spaltenKoepfe);
-    console.log('📊 Spitzenleistung Werte:', tabellenDaten.spitzenLeistungWerte);
+
+    if (tabellenDaten.debugHtml) {
+      console.log('🐛 DEBUG #performance-data-table (erste 8000 Zeichen) ──────────');
+      console.log(tabellenDaten.debugHtml);
+      console.log('🐛 DEBUG Ende ──────────────────────────────────────────────────');
+    }
+
     const parsePct = (text) => {
       if (!text) return null;
-      const match = text.match(/(\d+)\s*%/);
-      return match ? parseInt(match[1]) : null;
+      const m = text.match(/(\d+)\s*%/);
+      return m ? parseInt(m[1]) : null;
     };
+    // AW-Leistungszahl aus "AW 10 OR-T + CS5800iAW 12 E" → 10 (erste AW-Zahl = Außeneinheit).
+    const parseAwNummer = (text) => {
+      const m = text ? text.match(/AW\s*(\d+)\s*OR-[ST]/i) : null;
+      return m ? parseInt(m[1]) : null;
+    };
+    // AW-Bezeichnung "AW 10 OR-T" aus dem Zelltext extrahieren.
     const extractAW = (text) => {
-      const m = text ? text.match(/AW\s+(\d+)\s+(OR-[ST])/) : null;
+      const m = text ? text.match(/AW\s*(\d+)\s*(OR-[ST])/i) : null;
       return m ? `AW ${m[1]} ${m[2]}` : null;
     };
-    const awKoepfe = tabellenDaten.spaltenKoepfe.filter(t => t.includes('OR-'));
-    const pctWerte = tabellenDaten.spitzenLeistungWerte.map(t => parsePct(t));
-    const varianten = awKoepfe.map((kopf, i) => ({
-      aw:    extractAW(kopf),
-      pct:   pctWerte[i] ?? null,
-      index: i,
+
+    const varianten = (tabellenDaten.spalten || []).map((s) => ({
+      position:       s.position,          // smaller | default | bigger
+      aw:             extractAW(s.bezeichnung),
+      awNummer:       parseAwNummer(s.bezeichnung),
+      pct:            parsePct(s.abdeckungText),   // pct = Wärmepumpenabdeckung
+      hatWarnung:     s.hatWarnung,
+      istAusgewaehlt: s.istAusgewaehlt,
     })).filter(v => v.pct !== null);
     console.log('🔍 Varianten:', varianten);
-    const beste = varianten.reduce((a, b) =>
-      Math.abs(a.pct - 100) <= Math.abs(b.pct - 100) ? a : b
-    );
-    const ausgewaehltIndex = await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button'));
-      const ausgewaehlt = btns.find(b => b.textContent.trim() === 'Ausgewählt');
-      if (!ausgewaehlt) return 0;
-      const allBtns = btns.filter(b =>
-        b.textContent.trim() === 'Ausgewählt' || b.textContent.trim() === 'Produkt ändern'
+
+    // ── Crash-Absicherung (früher: reduce auf leerem Array) ─────────────────
+    if (varianten.length === 0) {
+      throw new Error(
+        'Keine Varianten aus #performance-data-table lesbar (Wärmepumpenabdeckung nicht gefunden). ' +
+        'Bosch-HTML evtl. geändert — siehe DEBUG-Ausgabe im Log oben.'
       );
-      return allBtns.indexOf(ausgewaehlt);
-    });
-    console.log(`🎯 Beste Variante: ${beste.aw} (${beste.pct}%) Index: ${beste.index} | Aktuell: Index ${ausgewaehltIndex}`);
-    const spitzenleistung_klein_pct = pctWerte[0] ?? null;
-    const spitzenleistung_gross_pct = pctWerte[pctWerte.length - 1] ?? null;
+    }
+
+    // ── Auswahl: Abdeckung nächst-100 %; bei Gleichstand kleinere AW-Zahl ───
+    const ZIEL_ABDECKUNG = 100;
+    const beste = varianten.reduce((a, b) => {
+      const da = Math.abs(a.pct - ZIEL_ABDECKUNG);
+      const db = Math.abs(b.pct - ZIEL_ABDECKUNG);
+      if (da !== db) return da < db ? a : b;                 // näher an 100 % gewinnt
+      const na = a.awNummer ?? Number.POSITIVE_INFINITY;      // Gleichstand:
+      const nb = b.awNummer ?? Number.POSITIVE_INFINITY;      // kleinere AW-Zahl gewinnt
+      return na <= nb ? a : b;
+    }, varianten[0]);
+
+    const aktuelleAuswahl = varianten.find(v => v.istAusgewaehlt) ?? null;
+    console.log(`🎯 Beste Variante: ${beste.aw} (Abdeckung ${beste.pct}%, Spalte ${beste.position}) | Aktuell ausgewählt: ${aktuelleAuswahl ? `${aktuelleAuswahl.aw} (${aktuelleAuswahl.position})` : 'unbekannt'}`);
+
+    // Abdeckung kleinste/größte Spalte (nach AW-Zahl sortiert) für DB-Felder.
+    const nachAw = [...varianten].sort((x, y) => (x.awNummer ?? 0) - (y.awNummer ?? 0));
+    // Hinweis: Felder heißen weiterhin spitzenleistung_*, enthalten jetzt Abdeckung (%).
+    const spitzenleistung_klein_pct = nachAw[0]?.pct ?? null;
+    const spitzenleistung_gross_pct = nachAw[nachAw.length - 1]?.pct ?? null;
     let finalesAW = beste.aw;
-    if (beste.index !== ausgewaehltIndex) {
-      // NEU: Bosch wechselt die Variante jetzt INLINE auf der Ergebnisseite.
-      // Kein Zurueck zur Inneneinheit, kein Weiter, keine neue Ergebnisseite mehr.
-      console.log(`🔄 Wechsle inline zu: ${beste.aw} (Spalte ${beste.index})`);
-      // Gezielte Spaltenwahl: alle Varianten-Buttons in Spalten-Reihenfolge
-      // (Ausgewählt + Produkt ändern), dann den an Position beste.index klicken.
-      // Robust fuer beliebig viele Varianten, nicht nur zwei.
-      const variantenBtns = page.getByRole('button', { name: /^(Ausgewählt|Produkt ändern)$/ });
-      const btnCount = await variantenBtns.count();
-      console.log(`🔢 Varianten-Buttons: ${btnCount} | Ziel-Spalte: ${beste.index}`);
-      await variantenBtns.nth(beste.index).click();
+
+    // ── Umschalten: nur wenn Zielspalte ≠ aktuell ausgewählte Spalte ────────
+    // Klick gezielt auf die Zelle der Zielspalte (Bundle-Klasse), statt Button-Index.
+    if (!beste.istAusgewaehlt) {
+      console.log(`🔄 Wechsle inline zu Spalte "${beste.position}" (${beste.aw})`);
+      const clsMap = {
+        smaller: 'smallerBundlePerformanceData',
+        default: 'defaultBundlePerformanceData',
+        bigger:  'biggerBundlePerformanceData',
+      };
+      const zielCls = clsMap[beste.position];
+      const zielZelle = page.locator(`#performance-data-table td[class*="${zielCls}"]`).first();
+      await zielZelle.click({ force: true }).catch(async () => {
+        console.warn('⚠️ Direkter Zell-Klick fehlgeschlagen — versuche Button-Fallback');
+        const btns = page.getByRole('button', { name: /^(Ausgewählt|Produkt ändern)$/ });
+        const idx = { smaller: 0, default: 1, bigger: 2 }[beste.position] ?? 0;
+        await btns.nth(idx).click().catch(() => {});
+      });
       await page.waitForTimeout(1500);
       console.log('✅ Variante inline gewechselt');
+    } else {
+      console.log('✅ Beste Variante ist bereits ausgewählt — kein Umschalten nötig');
     }
-    const decision = beste.pct >= 80 && beste.pct <= 110 ? 'ok' : beste.pct > 110 ? 'ueberdimensioniert' : 'warnung';
-    const warning_message = beste.pct > 110
-      ? `Spitzenleistung ${beste.pct}% – Überdimensionierung prüfen`
-      : beste.pct < 80
-      ? `Spitzenleistung ${beste.pct}% – unter 80%, manuelle Prüfung empfohlen`
+
+    // ── Decision: Bosch-Warn-Icon der gewählten Spalte übernehmen ───────────
+    const decision = beste.hatWarnung ? 'warnung' : 'ok';
+    const warning_message = beste.hatWarnung
+      ? `Wärmepumpenabdeckung ${beste.pct}% – Bosch markiert diese Variante mit Warnhinweis, manuelle Prüfung empfohlen`
       : null;
-    console.log(`🎯 Decision: ${decision} (${beste.pct}%) ${warning_message ?? ''}`);
-    const ausgewaehlteSpalte = awKoepfe[beste.index] ?? null;
-    empfohlenes_produkt = ausgewaehlteSpalte
-      ? `Compress ${serie} ${ausgewaehlteSpalte}`
+    console.log(`🎯 Decision: ${decision} (Abdeckung ${beste.pct}%) ${warning_message ?? ''}`);
+
+    empfohlenes_produkt = beste.aw
+      ? `Compress ${serie} ${beste.aw} + ${csModel}`
       : `Compress ${serie} ${finalesAW} + ${csModel}`;
     // ── PDF Download ─────────────────────────────────────────────────────────
     console.log('📥 PDF Download...');
