@@ -229,10 +229,53 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByText('Natürliches Kältemittel (R290)')
       .click({ force: true }).catch(() => {});
     await page.waitForTimeout(500);
-    // Passende Außeneinheit-Karte anklicken (Klick auf die Karte waehlt sie aus)
-    const awKarte = page.getByText(new RegExp(`Compress\\s+${serie}\\s+AW`, 'i')).first();
-    await awKarte.waitFor({ state: 'visible', timeout: 20000 });
-    await awKarte.click({ force: true });
+    // ── NEU: Bosch hat die Produktauswahl umgebaut. Karten liegen jetzt in
+    // App__IOUBundleCombinationsContainer und tragen data-Attribute. Der alte
+    // Textselektor (Compress <serie> AW) griff nicht mehr, weil der sichtbare
+    // Titel jetzt "Compress 5800i AW AW 10 OR-T" o.ä. lautet (Text zerstückelt).
+    // Auswahl daher über data-product-name (enthält Serie) + R290-Filter
+    // (data-refrigerant-type="Natural"). 3800i/8800i werden so ausgeschlossen.
+    // "Egal welche Stufe" → erste passende Karte reicht (Leistungsstufe fällt
+    // später auf der Ergebnisseite).
+    await page.waitForSelector('.App__IOUnit__kf7TA', { timeout: 20000 });
+    const awKarte = page.locator(
+      `.App__IOUnit__kf7TA[data-product-name*="${serie}"][data-refrigerant-type="Natural"]`
+    ).first();
+
+    // Existenz prüfen; bei 0 Treffern HTML des Containers ins Log dumpen.
+    if (await awKarte.count() === 0) {
+      const dump = await page.evaluate(() => {
+        const c = document.querySelector('.App__IOUBundleCombinationsContainer__KpgdE')
+          || document.querySelector('[class*="IOUBundleCombinationsContainer"]');
+        return c ? c.outerHTML.slice(0, 8000) : '(Container nicht gefunden)';
+      });
+      console.log('🐛 DEBUG Außeneinheit-Karten (erste 8000 Zeichen) ─────────────');
+      console.log(dump);
+      console.log('🐛 DEBUG Ende ──────────────────────────────────────────────────');
+      throw new Error(
+        `Keine Außeneinheit-Karte für Serie ${serie} mit R290 gefunden. ` +
+        `Bosch-Produktauswahl evtl. geändert — siehe DEBUG oben.`
+      );
+    }
+
+    const awKarteName = await awKarte.getAttribute('data-market-generic-description').catch(() => null);
+    console.log(`🌳 [13a] Karte gewählt: ${serie} / ${awKarteName ?? 'Bezeichnung unbekannt'}`);
+
+    // Klick: Karte selbst ist klickbar (kein Button/Radio innen). Mehrere
+    // Strategien nacheinander, falls ein innenliegendes Element den Klick abfängt.
+    await awKarte.scrollIntoViewIfNeeded().catch(() => {});
+    let awGeklickt = false;
+    for (const strat of ['self', 'title', 'parent']) {
+      try {
+        if (strat === 'self')  await awKarte.click({ force: true, timeout: 5000 });
+        if (strat === 'title') await awKarte.locator('[class*="IOUnitTitle"]').first().click({ force: true, timeout: 5000 });
+        if (strat === 'parent')await awKarte.locator('xpath=..').click({ force: true, timeout: 5000 });
+        awGeklickt = true;
+        console.log(`🌳 [13a] Klick-Strategie erfolgreich: ${strat}`);
+        break;
+      } catch (e) { /* nächste Strategie */ }
+    }
+    if (!awGeklickt) throw new Error('Außeneinheit-Karte gefunden, aber Klick auf keine Weise möglich.');
     await page.waitForTimeout(500);
     await page.getByRole('button', { name: 'Weiter' }).click();
     await page.waitForTimeout(2000);
