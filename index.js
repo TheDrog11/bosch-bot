@@ -47,6 +47,28 @@ app.post('/api/run-advisor', async (req, res) => {
     console.log(`✅ Produkt: ${data.name}`);
     return data.id;
   }
+  // ── Startseite laden ───────────────────────────────────────────────────────
+  // Die Bosch-Seite (Azure) hängt zeitweise komplett — Requests laufen ohne ein
+  // einziges Byte in den Timeout. Ein einzelner Aussetzer darf den Lauf nicht
+  // killen, also mehrere Versuche mit wachsender Pause.
+  async function ladeStartseite(page) {
+    const VERSUCHE = 4;
+    for (let v = 1; v <= VERSUCHE; v++) {
+      try {
+        await page.goto('https://bosch-de-heatpump.thernovo.com/home',
+          { waitUntil: 'domcontentloaded', timeout: 45000 });
+        if (v > 1) console.log(`🌐 Startseite geladen (Versuch ${v}/${VERSUCHE})`);
+        return;
+      } catch (e) {
+        const grund = e.message.split('\n')[0];
+        console.warn(`⚠️ Startseite Versuch ${v}/${VERSUCHE} fehlgeschlagen: ${grund}`);
+        if (v === VERSUCHE) {
+          throw new Error(`Bosch-Seite nach ${VERSUCHE} Versuchen nicht erreichbar (${grund}) — Bosch-Dienst gestört, Lauf bitte später wiederholen.`);
+        }
+        await page.waitForTimeout(5000 * v);
+      }
+    }
+  }
   // ── Cookie-Banner Helper ───────────────────────────────────────────────────
   async function dismissCookieBanner(page) {
     try {
@@ -102,7 +124,7 @@ app.post('/api/run-advisor', async (req, res) => {
     const page = await context.newPage();
     await dbUpdate(record_id, { status: 'running' });
     // ── SCHRITT 1: Seite laden ───────────────────────────────────────────────
-    await page.goto('https://bosch-de-heatpump.thernovo.com/home', { waitUntil: 'domcontentloaded' });
+    await ladeStartseite(page);
     await page.waitForTimeout(2000);
     await dismissCookieBanner(page);
     await page.getByText('Straße Hausnummer').click({ force: true });
@@ -469,19 +491,95 @@ app.post('/api/run-advisor', async (req, res) => {
       ? `Compress ${serie} ${beste.aw} + ${csModel}`
       : `Compress ${serie} ${finalesAW} + ${csModel}`;
     // ── PDF Download ─────────────────────────────────────────────────────────
+    // Bosch erzeugt das PDF serverseitig: "PDF Download" öffnet nur das Export-
+    // Modal, der Bestätigen-Button darin (id="exportRecommendation") schickt
+    // POST .../api/vpw/recommendation/pdf/export an heatpump-api.thernovo.com
+    // und klickt anschließend einen Blob-<a download>. Schlägt dieser Request
+    // fehl oder hängt er, verschluckt die Bosch-App den Fehler komplett (kein
+    // catch) — sichtbar war bisher nur der nackte "waiting for event download".
+    // Deshalb: Antwort des Endpunkts mitschneiden (echte Ursache im Log),
+    // den Request notfalls selbst wiederholen und insgesamt mehrfach versuchen.
     console.log('📥 PDF Download...');
-    await page.getByRole('button', { name: 'PDF Download' }).first().click();
-    await page.waitForTimeout(1000);
-    const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
-    await page.getByRole('button', { name: 'Diese Empfehlung herunterladen' }).click();
-    const download = await downloadPromise;
-    console.log(`📄 PDF heruntergeladen: ${download.suggestedFilename()}`);
     const path = require('path');
     const fs   = require('fs');
-    const tmpPath = path.join('/tmp', `bosch-hpa-${record_id}.pdf`);
-    await download.saveAs(tmpPath);
-    const pdfBuffer = fs.readFileSync(tmpPath);
-    fs.unlinkSync(tmpPath);
+
+    let exportAntwort = null;  // letzte Antwort des Bosch-PDF-Endpunkts
+    let exportRequest = null;  // URL + Payload, um den Request notfalls selbst zu wiederholen
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && /recommendation\/pdf\/export/i.test(r.url())) {
+        exportRequest = { url: r.url(), data: r.postData() };
+      }
+    });
+    page.on('response', async (r) => {
+      if (!/recommendation\/pdf\/export/i.test(r.url())) return;
+      exportAntwort = { status: r.status(), body: null };
+      console.log(`📡 Bosch-PDF-Endpunkt: HTTP ${r.status()}`);
+      if (!r.ok()) exportAntwort.body = await r.text().catch(() => null);
+    });
+
+    // Fallback: Der Browser-Body ist über Playwright nicht auslesbar, also
+    // schicken wir denselben POST bei Bedarf direkt aus Node noch einmal.
+    // Greift, wenn Bosch das PDF zwar liefert, der Blob-Klick aber verpufft.
+    async function pdfDirektHolen() {
+      if (!exportRequest?.data) return null;
+      const antwort = await context.request.post(exportRequest.url, {
+        data: exportRequest.data,
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000,
+      }).catch(() => null);
+      if (!antwort || !antwort.ok()) return null;
+      const bytes = await antwort.body().catch(() => null);
+      return bytes && bytes.length > 0 ? bytes : null;
+    }
+
+    // Ein Versuch = Modal sicherstellen, bestätigen, auf Download ODER
+    // PDF-Response warten. Der Download landet je nach Bosch-Variante auf der
+    // Seite selbst oder in einem Popup — beides abdecken.
+    async function pdfVersuch(force) {
+      const bestaetigen = page.locator('#exportRecommendation');
+      if (!(await bestaetigen.isVisible().catch(() => false))) {
+        await page.getByRole('button', { name: 'PDF Download' }).first().click({ force });
+        await bestaetigen.waitFor({ state: 'visible', timeout: 20000 });
+      }
+      exportAntwort = null;
+      exportRequest = null;
+      const wartetAufDownload = Promise.race([
+        page.waitForEvent('download', { timeout: 75000 }),
+        context.waitForEvent('page', { timeout: 75000 })
+          .then(p => p.waitForEvent('download', { timeout: 75000 })),
+      ]);
+      await bestaetigen.click({ force });
+      return wartetAufDownload;
+    }
+
+    let pdfBuffer = null;
+    for (let v = 1; v <= 3; v++) {
+      try {
+        const download = await pdfVersuch(v > 1);
+        console.log(`📄 PDF heruntergeladen: ${download.suggestedFilename()}`);
+        const tmpPath = path.join('/tmp', `bosch-hpa-${record_id}.pdf`);
+        await download.saveAs(tmpPath);
+        pdfBuffer = fs.readFileSync(tmpPath);
+        fs.unlinkSync(tmpPath);
+        break;
+      } catch (e) {
+        // Kein Download-Event — aber vielleicht liefert der Endpunkt das PDF
+        // trotzdem. Dann holen wir es direkt, statt den Lauf wegzuwerfen.
+        const direkt = await pdfDirektHolen();
+        if (direkt) {
+          console.log(`📄 PDF direkt vom Bosch-Endpunkt geholt (${direkt.length} Bytes)`);
+          pdfBuffer = direkt;
+          break;
+        }
+        const ursache = exportAntwort
+          ? `Bosch-PDF-Dienst antwortete HTTP ${exportAntwort.status}` +
+            (exportAntwort.body ? ` – ${exportAntwort.body.slice(0, 150)}` : '')
+          : 'Bosch-PDF-Dienst hat nicht geantwortet (kein Download ausgelöst)';
+        console.warn(`⚠️ PDF-Versuch ${v}/3: ${ursache}`);
+        if (v === 3) throw new Error(`PDF-Download fehlgeschlagen: ${ursache}`);
+        await page.waitForTimeout(5000 * v);
+      }
+    }
     // ── Supabase Storage Upload ───────────────────────────────────────────────
     const timestamp   = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const storagePath = `hpa/${lead_id}/bosch-advisor-${timestamp}.pdf`;
