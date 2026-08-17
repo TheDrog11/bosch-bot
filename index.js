@@ -242,7 +242,11 @@ app.post('/api/run-advisor', async (req, res) => {
       console.log('📏 [12] Abstand-Schritt nicht vorhanden — übersprungen');
     }
     // ── SCHRITT 13: Produktauswahl ───────────────────────────────────────────
-    const serie = raumheizung.includes('Heizkörper') ? '6800i' : '5800i';
+    // Baureihe: immer 5800i — auch bei reinen Heizkörper-Objekten (vorher: HK → 6800i).
+    // Vorgabe des Bosch-Außendienstes: 5800i ist die anzubietende Serie, die höhere
+    // Vorlauftemperatur der 6800i wird für unsere Objekte nicht benötigt.
+    // Die Suffix-Logik unten (Heizkörper → MB) bleibt davon unberührt.
+    const serie = '5800i';
 
     // ── SCHRITT 13a: Außeneinheit waehlen (1. Stufe der neuen Produktauswahl) ──
     console.log(`🌳 [13a] Außeneinheit-Stufe: Serie ${serie}`);
