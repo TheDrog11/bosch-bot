@@ -81,6 +81,64 @@ app.post('/api/run-advisor', async (req, res) => {
     });
     await page.waitForTimeout(300);
   }
+  // ── Weiter-Klick mit Wirkungskontrolle ─────────────────────────────────────
+  // Der Bosch-Wizard rendert React-Seiten neu, während Playwright klickt. Fällt
+  // ein Klick genau in dieses Fenster, kommt er an, bewirkt aber nichts. Bisher
+  // fiel das erst Schritte später auf: der Bot stand einen Schritt zurück, fand
+  // den Abstand-Schritt nicht und lief in einen Timeout auf die Produktkarten
+  // (Leads Wagner und Brümmer am 17.09.2026). Zwei der Wizard-Seiten tragen
+  // dieselbe Überschrift ("Welche Technologie möchten Sie verwenden?"), ein
+  // Wait auf den Fragetext kann den Rueckstand also nicht bemerken.
+  // Deshalb wird jeder Weiter-Klick jetzt daran gemessen, ob sich der Seiteninhalt
+  // wirklich ändert, und sonst wiederholt.
+  async function seitenText(page) {
+    return await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').trim());
+  }
+  async function aktuelleFrage(page) {
+    return await page.evaluate(() => {
+      const h = document.querySelector('h1, h2, h3');
+      // innerText statt textContent: die Bosch-Überschriften sind umgebrochen,
+      // textContent klebt die Zeilen sonst zu "Technologiemöchten" zusammen.
+      return h ? (h.innerText || h.textContent).replace(/\s+/g, ' ').trim() : '(keine Überschrift)';
+    }).catch(() => '(Seite nicht lesbar)');
+  }
+  async function klickMitWirkung(page, knopf, label, { versuche = 3, timeout = 8000, danach = 700 } = {}) {
+    for (let v = 1; v <= versuche; v++) {
+      const vorher = await seitenText(page);
+      await knopf().click();
+      const gewechselt = await page.waitForFunction(
+        (alt) => (document.body?.innerText || '').replace(/\s+/g, ' ').trim() !== alt,
+        vorher,
+        { timeout },
+      ).then(() => true).catch(() => false);
+      if (gewechselt) {
+        if (v > 1) console.log(`   ↻ [${label}] Klick wirkte erst im ${v}. Versuch`);
+        await page.waitForTimeout(danach);
+        return;
+      }
+      console.warn(`⚠️  [${label}] Klick ${v}/${versuche} ohne Wirkung, wiederhole`);
+      await page.waitForTimeout(800);
+    }
+    throw new Error(
+      `Bosch-Planer kommt im Schritt "${await aktuelleFrage(page)}" nicht weiter: ` +
+      `der Knopf blieb ${versuche} mal ohne Wirkung. Bitte Lauf wiederholen.`
+    );
+  }
+  async function weiter(page, label, opts) {
+    return klickMitWirkung(page, () => page.getByRole('button', { name: 'Weiter' }), label, opts);
+  }
+  // Wartet auf die erwartete Frage und meldet im Fehlerfall, wo der Planer
+  // stattdessen steht. Ohne das steht in AuraOS nur ein nackter Playwright-Timeout.
+  async function warteAufFrage(page, text, label, timeout = 20000) {
+    const da = await page.waitForSelector(`text=${text}`, { timeout }).then(() => true).catch(() => false);
+    if (!da) {
+      throw new Error(
+        `Bosch-Planer hat den Schritt "${label}" nicht erreicht (erwartet: "${text}"), ` +
+        `die Seite steht bei "${await aktuelleFrage(page)}". Bitte Lauf wiederholen.`
+      );
+    }
+  }
+
   // ── Concurrency Check — nur ein Run pro Lead gleichzeitig ───────────────
   const { data: laufend } = await supabase
     .from('lead_hpa_results')
@@ -136,26 +194,23 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('textbox', { name: 'PLZ *' }).click();
     await page.getByRole('textbox', { name: 'PLZ *' }).fill(String(plz));
     await page.waitForTimeout(1500);
-    await page.getByRole('button', { name: 'Start' }).click();
-    await page.waitForTimeout(1000);
+    await klickMitWirkung(page, () => page.getByRole('button', { name: 'Start' }), '1 Start',
+      { timeout: 15000, danach: 1000 });
     // ── SCHRITT 2: Projektart → Default Sanierung → Weiter ──────────────────
     console.log('🏗️  [2] Projektart...');
-    await page.waitForSelector('text=Welche Art von Projekt', { timeout: 20000 });
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+    await warteAufFrage(page, 'Welche Art von Projekt', '2 Projektart');
+    await weiter(page, '2 Projektart');
     // ── SCHRITT 3: Zweiter Wärmeerzeuger → Default Nein → Weiter ────────────
     console.log('🔧 [3] Zweiter Wärmeerzeuger...');
-    await page.waitForSelector('text=zweiter', { timeout: 20000 });
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+    await warteAufFrage(page, 'zweiter', '3 Zweiter Wärmeerzeuger');
+    await weiter(page, '3 Zweiter Wärmeerzeuger');
     // ── SCHRITT 4: Temperaturen → Default ok → Weiter ───────────────────────
     console.log('🌡️  [4] Temperaturen...');
-    await page.waitForSelector('text=Welche Temperaturen', { timeout: 20000 });
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+    await warteAufFrage(page, 'Welche Temperaturen', '4 Temperaturen');
+    await weiter(page, '4 Temperaturen');
     // ── SCHRITT 5: Wärmebedarf ───────────────────────────────────────────────
     console.log(`⚡ [5] Wärmebedarf: ${energieverbrauch} kWh/a | Warmwasser über WP: ${warmwasserAktiv ? 'Ja' : 'Nein'}`);
-    await page.waitForSelector('text=Wie hoch ist der Wärmebedarf', { timeout: 20000 });
+    await warteAufFrage(page, 'Wie hoch ist der Wärmebedarf', '5 Wärmebedarf');
     await page.getByRole('tab', { name: 'in kWh/a (Verbrauch/Jahr) ' }).click();
     await page.waitForTimeout(400);
     if (warmwasserAktiv) {
@@ -165,18 +220,16 @@ app.post('/api/run-advisor', async (req, res) => {
     await page.getByRole('textbox', { name: 'Energiebedarf' }).click({ clickCount: 3 });
     await page.getByRole('textbox', { name: 'Energiebedarf' }).type(String(energieverbrauch), { delay: 50 });
     await page.waitForTimeout(300);
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+    await weiter(page, '5 Wärmebedarf');
     // ── SCHRITT 6: Verteilsystem ─────────────────────────────────────────────
     console.log('🔥 [6] Verteilsystem: ' + raumheizung);
-    await page.waitForSelector('text=Welches Verteilsystem', { timeout: 20000 });
+    await warteAufFrage(page, 'Welches Verteilsystem', '6 Verteilsystem');
     await page.getByText(raumheizung, { exact: true }).click();
     await page.waitForTimeout(300);
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+    await weiter(page, '6 Verteilsystem');
     // ── SCHRITT 7: Warmwasser Personen ───────────────────────────────────────
     console.log(`👥 [7] Warmwasser Personen | Warmwasser über WP: ${warmwasserAktiv ? 'Ja' : 'Nein'}`);
-    await page.waitForSelector('text=Wie viele Personen', { timeout: 20000 });
+    await warteAufFrage(page, 'Wie viele Personen', '7 Warmwasser Personen');
 
     if (!warmwasserAktiv) {
       // ── Kein Warmwasser über WP → Button klicken, Schritte 8+9 entfallen ──
@@ -193,52 +246,55 @@ app.post('/api/run-advisor', async (req, res) => {
       }
     }
 
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+    await weiter(page, '7 Warmwasser Personen');
 
     // ── SCHRITT 8 + 9: Nur wenn Warmwasser über WP ──────────────────────────
     if (warmwasserAktiv) {
       // ── SCHRITT 8: Warmwassersystem ──────────────────────────────────────
       console.log('💧 [8] Warmwassersystem...');
-      await page.waitForSelector('text=Welches Warmwassersystem', { timeout: 20000 });
-      await page.getByRole('button', { name: 'Weiter' }).click();
-      await page.waitForTimeout(700);
+      await warteAufFrage(page, 'Welches Warmwassersystem', '8 Warmwassersystem');
+      await weiter(page, '8 Warmwassersystem');
       // ── SCHRITT 9: Warmwassermenge ───────────────────────────────────────
       console.log('🚿 [9] Warmwassermenge...');
-      await page.waitForSelector('text=Warmwassermenge', { timeout: 20000 });
-      await page.getByRole('button', { name: 'Weiter' }).click();
-      await page.waitForTimeout(700);
+      await warteAufFrage(page, 'Warmwassermenge', '9 Warmwassermenge');
+      await weiter(page, '9 Warmwassermenge');
     } else {
       console.log('⏭️  [8+9] Übersprungen (kein Warmwasser)');
     }
 
     // ── SCHRITT 10: Technologie Art ──────────────────────────────────────────
     console.log('🌬️  [10] Technologie Art...');
-    await page.waitForTimeout(1500);
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+    await warteAufFrage(page, 'Welche Technologie', '10 Technologie Art');
+    await weiter(page, '10 Technologie Art');
     // ── SCHRITT 10b: Kompressor-Technologie (nur bei >= 39.150 kWh) ──────────
+    // Bosch stellt diese Frage seit einem Umbau nicht mehr (geprüft am 17.09.2026
+    // mit 42.000 kWh: die Seitenfolge ist dieselbe wie bei kleinen Verbräuchen).
+    // Der harte Wait ließ bis dahin jeden Lauf ab 39.150 kWh scheitern. Der Schritt
+    // wird deshalb wie der Abstand-Schritt behandelt: mitnehmen, wenn er kommt.
     if (energieverbrauch >= 39150) {
-      console.log('⚡ [10b] Kompressor-Technologie: Inverter (kWh >= 39.150)');
-      await page.waitForSelector('text=Inverter', { timeout: 10000 });
-      await page.getByText('Inverter', { exact: true }).click();
-      await page.waitForTimeout(300);
-      await page.getByRole('button', { name: 'Weiter' }).click();
-      await page.waitForTimeout(700);
+      const inverterSchritt = await page.waitForSelector('text=Inverter', { timeout: 8000 })
+        .then(() => true).catch(() => false);
+      if (inverterSchritt) {
+        console.log('⚡ [10b] Kompressor-Technologie: Inverter (kWh >= 39.150)');
+        await page.getByText('Inverter', { exact: true }).click();
+        await page.waitForTimeout(300);
+        await weiter(page, '10b Kompressor-Technologie');
+      } else {
+        console.log('⚡ [10b] Kompressor-Technologie nicht abgefragt — übersprungen');
+      }
     }
     // ── SCHRITT 11: Technologie Aufstellung ──────────────────────────────────
     console.log('🏠 [11] Technologie Aufstellung...');
-    await page.waitForSelector('text=Welche Technologie', { timeout: 20000 });
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(700);
+    await warteAufFrage(page, 'Welche Technologie', '11 Technologie Aufstellung');
+    await weiter(page, '11 Technologie Aufstellung');
     // ── SCHRITT 12: Distanz Schall (optional) ────────────────────────────────
     console.log('📏 [12] Distanz Schall (optional)...');
-    try {
-      await page.waitForSelector('text=Abstand', { timeout: 8000 });
-      await page.getByRole('button', { name: 'Weiter' }).click();
+    const abstandSchritt = await page.waitForSelector('text=Abstand', { timeout: 8000 })
+      .then(() => true).catch(() => false);
+    if (abstandSchritt) {
+      await weiter(page, '12 Abstand', { danach: 2000 });
       console.log('📏 [12] Abstand-Schritt durchgeführt');
-      await page.waitForTimeout(2000);
-    } catch (e) {
+    } else {
       console.log('📏 [12] Abstand-Schritt nicht vorhanden — übersprungen');
     }
     // ── SCHRITT 13: Produktauswahl ───────────────────────────────────────────
@@ -251,9 +307,23 @@ app.post('/api/run-advisor', async (req, res) => {
     // ── SCHRITT 13a: Außeneinheit waehlen (1. Stufe der neuen Produktauswahl) ──
     console.log(`🌳 [13a] Außeneinheit-Stufe: Serie ${serie}`);
     await dismissCookieBanner(page);
+    // Erst pruefen, ob die Produktauswahl überhaupt erreicht ist. Steht der
+    // Wizard noch auf einer Frageseite, nennt die Fehlermeldung diese Seite,
+    // statt stumm in einen Selektor-Timeout zu laufen.
+    // Kartenselektor: bevorzugt die CSS-Modul-Klasse, sonst die data-Attribute,
+    // die einen Bosch-Rebuild (neuer Klassen-Hash) überleben.
+    const KARTEN_SELEKTOR = '.App__IOUnit__kf7TA, [data-product-name][data-refrigerant-type]';
+    const produktauswahlDa = await page.waitForSelector(KARTEN_SELEKTOR, { timeout: 25000 })
+      .then(() => true).catch(() => false);
+    if (!produktauswahlDa) {
+      throw new Error(
+        `Bosch-Planer hat die Produktauswahl nicht erreicht, die Seite steht noch bei ` +
+        `"${await aktuelleFrage(page)}". Bitte Lauf wiederholen.`
+      );
+    }
     // Kältemittel R290 ist Standard, defensiv sicherstellen:
     await page.getByText('Natürliches Kältemittel (R290)')
-      .click({ force: true }).catch(() => {});
+      .click({ force: true, timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(500);
     // ── NEU: Bosch hat die Produktauswahl umgebaut. Karten liegen jetzt in
     // App__IOUBundleCombinationsContainer und tragen data-Attribute. Der alte
@@ -263,9 +333,12 @@ app.post('/api/run-advisor', async (req, res) => {
     // (data-refrigerant-type="Natural"). 3800i/8800i werden so ausgeschlossen.
     // "Egal welche Stufe" → erste passende Karte reicht (Leistungsstufe fällt
     // später auf der Ergebnisseite).
-    await page.waitForSelector('.App__IOUnit__kf7TA', { timeout: 20000 });
+    await page.waitForSelector(KARTEN_SELEKTOR, { timeout: 20000 });
+    const kartenBasis = (await page.locator('.App__IOUnit__kf7TA').count()) > 0
+      ? '.App__IOUnit__kf7TA'
+      : '[data-product-name][data-refrigerant-type]';
     const awKarte = page.locator(
-      `.App__IOUnit__kf7TA[data-product-name*="${serie}"][data-refrigerant-type="Natural"]`
+      `${kartenBasis}[data-product-name*="${serie}"][data-refrigerant-type="Natural"]`
     ).first();
 
     // Existenz prüfen; bei 0 Treffern HTML des Containers ins Log dumpen.
@@ -303,8 +376,7 @@ app.post('/api/run-advisor', async (req, res) => {
     }
     if (!awGeklickt) throw new Error('Außeneinheit-Karte gefunden, aber Klick auf keine Weise möglich.');
     await page.waitForTimeout(500);
-    await page.getByRole('button', { name: 'Weiter' }).click();
-    await page.waitForTimeout(2000);
+    await weiter(page, '13a Außeneinheit', { danach: 2000 });
     console.log('🌳 [13a] Außeneinheit gewählt, weiter zur Inneneinheit');
 
     // Suffix-Logik:
@@ -338,10 +410,9 @@ app.post('/api/run-advisor', async (req, res) => {
     console.log(`🔍 Außeneinheit erkannt: ${aussenBezeichnung ?? 'nicht gefunden'}`);
     await page.getByText(csRegex).first().click();
     await page.waitForTimeout(800);
-    const weiterProdukt = page.getByRole('button', { name: 'Weiter' });
-    await weiterProdukt.waitFor({ state: 'visible', timeout: 20000 });
-    await weiterProdukt.click();
-    await page.waitForTimeout(2000);
+    await page.getByRole('button', { name: 'Weiter' })
+      .waitFor({ state: 'visible', timeout: 20000 });
+    await weiter(page, '13b Inneneinheit', { danach: 2000 });
     // ── Ergebnisseite ────────────────────────────────────────────────────────
     console.log('📊 Warte auf Ergebnisseite...');
     await page.waitForSelector('button:has-text("PDF Download")', { timeout: 20000 });
