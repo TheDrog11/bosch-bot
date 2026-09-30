@@ -383,9 +383,11 @@ app.post('/api/run-advisor', async (req, res) => {
     // - Heizkörper (auch HK+FB Kombi) → immer MB
     // - Fußbodenheizung + Deckenhöhe >= 235 → M
     // - Fußbodenheizung + Deckenhöhe < 235 → MB (M passt nicht)
+    // - Kein Warmwasser über WP → MB (M hat den integrierten Warmwasserspeicher,
+    //   Bosch bietet es bei "Nur Heizung" nicht an, nur E und MB)
     // - E wird nie gewählt
     let suffix;
-    if (raumheizung.includes('Heizkörper')) {
+    if (raumheizung.includes('Heizkörper') || !warmwasserAktiv) {
       suffix = 'MB';
     } else {
       suffix = deckenhoehe_hwr >= 235 ? 'M' : 'MB';
@@ -402,7 +404,19 @@ app.post('/api/run-advisor', async (req, res) => {
     await dismissCookieBanner(page);
     const csRegex = new RegExp(`CS\\s*${serie}\\s*AW\\s*12\\s*${suffix}\\b`, 'i');
     const karte = page.locator('a, div, label').filter({ hasText: csRegex }).first();
-    await karte.waitFor({ state: 'attached', timeout: 35000 });
+    const karteDa = await karte.waitFor({ state: 'attached', timeout: 35000 })
+      .then(() => true).catch(() => false);
+    if (!karteDa) {
+      const angeboten = await page.evaluate(() => [...new Set(
+        Array.from(document.querySelectorAll('*'))
+          .filter(e => e.children.length === 0 && /CS\s*\d{4}i/i.test(e.textContent))
+          .map(e => e.textContent.replace(/\s+/g, ' ').trim())
+      )]);
+      throw new Error(
+        `Inneneinheit ${csModel} wird von Bosch nicht angeboten. ` +
+        `Angeboten: ${angeboten.join(', ') || 'keine'}.`
+      );
+    }
     await page.waitForTimeout(500);
     const kartenText = await karte.textContent().catch(() => '');
     const awMatch = kartenText.match(/AW\s+(\d+)\s+(OR-[ST])/);
