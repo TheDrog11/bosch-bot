@@ -460,6 +460,7 @@ app.post('/api/run-advisor', async (req, res) => {
 
       const kopfRow      = findRow('Wärmepumpe');            // Produktnamen / AW-Bezeichnung
       const abdeckungRow = findRow('Wärmepumpenabdeckung');  // %-Werte + evtl. Warn-Icon
+      const spitzeRow    = findRow('Spitzenleistungsabdeckung'); // % am Norm-Außentag, kann über 100 liegen
 
       const zelleFuer = (row, cls) =>
         row ? row.querySelector(`td[class*="${cls}"]`) : null;
@@ -467,11 +468,13 @@ app.post('/api/run-advisor', async (req, res) => {
       const spalten = POS.map(({ key, cls }) => {
         const kopfTd = zelleFuer(kopfRow, cls);
         const abTd   = zelleFuer(abdeckungRow, cls);
+        const spTd   = zelleFuer(spitzeRow, cls);
         return {
           position:      key,
           vorhanden:     !!(kopfTd || abTd),
           bezeichnung:   kopfTd ? norm(kopfTd.textContent) : null,
           abdeckungText: abTd ? norm(abTd.textContent) : null,
+          spitzeText:    spTd ? norm(spTd.textContent) : null,
           hatWarnung:    !!(abTd && abTd.querySelector('[class*="BoschAlertWarningIcon"]')),
           istAusgewaehlt:!!(kopfTd && /SelectedBundleBKG/.test(kopfTd.className))
                         || !!(abTd && /SelectedBundleBKG/.test(abTd.className)),
@@ -493,8 +496,9 @@ app.post('/api/run-advisor', async (req, res) => {
 
     const parsePct = (text) => {
       if (!text) return null;
-      const m = text.match(/(\d+)\s*%/);
-      return m ? parseInt(m[1]) : null;
+      // Bosch zeigt ganze Prozent; Nachkommastellen mit Komma oder Punkt werden trotzdem richtig gelesen.
+      const m = text.match(/(\d+(?:[.,]\d+)?)\s*%/);
+      return m ? parseFloat(m[1].replace(',', '.')) : null;
     };
     // AW-Leistungszahl aus "AW 10 OR-T + CS5800iAW 12 E" → 10 (erste AW-Zahl = Außeneinheit).
     const parseAwNummer = (text) => {
@@ -512,6 +516,7 @@ app.post('/api/run-advisor', async (req, res) => {
       aw:             extractAW(s.bezeichnung),
       awNummer:       parseAwNummer(s.bezeichnung),
       pct:            parsePct(s.abdeckungText),   // pct = Wärmepumpenabdeckung
+      spitze:         parsePct(s.spitzeText),      // Spitzenleistungsabdeckung bei Norm-Außentemperatur
       hatWarnung:     s.hatWarnung,
       istAusgewaehlt: s.istAusgewaehlt,
     })).filter(v => v.pct !== null);
@@ -525,19 +530,35 @@ app.post('/api/run-advisor', async (req, res) => {
       );
     }
 
-    // ── Auswahl: Abdeckung nächst-100 %; bei Gleichstand kleinere AW-Zahl ───
-    const ZIEL_ABDECKUNG = 100;
-    const beste = varianten.reduce((a, b) => {
-      const da = Math.abs(a.pct - ZIEL_ABDECKUNG);
-      const db = Math.abs(b.pct - ZIEL_ABDECKUNG);
-      if (da !== db) return da < db ? a : b;                 // näher an 100 % gewinnt
-      const na = a.awNummer ?? Number.POSITIVE_INFINITY;      // Gleichstand:
-      const nb = b.awNummer ?? Number.POSITIVE_INFINITY;      // kleinere AW-Zahl gewinnt
-      return na <= nb ? a : b;
-    }, varianten[0]);
+    // ── Auswahl (Regel Aura, 10.11.2026, wie die HLB in AuraOS) ───────────────
+    // 1. Nur Varianten mit Spitzenleistungsabdeckung <= 100 % (nicht größer als nötig).
+    // 2. Davon die kleinste mit Wärmepumpenabdeckung >= 99 %.
+    // 3. Sonst die mit der höchsten Abdeckung, bei Gleichstand die kleinere.
+    // 4. Keine Variante <= 100 %: die kleinste. Fehlt die Spitzenlast-Zeile: alte Regel (am nächsten an 100 %).
+    const ABDECKUNG_MIN = 99;
+    const SPITZE_MAX = 100;
+    const nachGroesse = [...varianten].sort((x, y) => (x.awNummer ?? 99) - (y.awNummer ?? 99));
+    let beste;
+    if (varianten.some(v => v.spitze === null)) {
+      console.warn('⚠️ Spitzenleistungsabdeckung nicht für alle Varianten lesbar, Auswahl nach Abdeckung nächst-100 %');
+      beste = varianten.reduce((a, b) => {
+        const da = Math.abs(a.pct - 100);
+        const db = Math.abs(b.pct - 100);
+        if (da !== db) return da < db ? a : b;
+        return (a.awNummer ?? 99) <= (b.awNummer ?? 99) ? a : b;
+      }, varianten[0]);
+    } else {
+      const passend = nachGroesse.filter(v => v.spitze <= SPITZE_MAX);
+      if (passend.length === 0) {
+        beste = nachGroesse[0];
+      } else {
+        beste = passend.find(v => v.pct >= ABDECKUNG_MIN)
+          ?? passend.reduce((a, b) => (b.pct > a.pct ? b : a), passend[0]);
+      }
+    }
 
     const aktuelleAuswahl = varianten.find(v => v.istAusgewaehlt) ?? null;
-    console.log(`🎯 Beste Variante: ${beste.aw} (Abdeckung ${beste.pct}%, Spalte ${beste.position}) | Aktuell ausgewählt: ${aktuelleAuswahl ? `${aktuelleAuswahl.aw} (${aktuelleAuswahl.position})` : 'unbekannt'}`);
+    console.log(`🎯 Beste Variante: ${beste.aw} (Abdeckung ${beste.pct}%, Spitzenlast ${beste.spitze ?? "?"}%, Spalte ${beste.position}) | Aktuell ausgewählt: ${aktuelleAuswahl ? `${aktuelleAuswahl.aw} (${aktuelleAuswahl.position})` : 'unbekannt'}`);
 
     // Abdeckung kleinste/größte Spalte (nach AW-Zahl sortiert) für DB-Felder.
     const nachAw = [...varianten].sort((x, y) => (x.awNummer ?? 0) - (y.awNummer ?? 0));
@@ -572,7 +593,7 @@ app.post('/api/run-advisor', async (req, res) => {
     // ── Decision: Bosch-Warn-Icon der gewählten Spalte übernehmen ───────────
     const decision = beste.hatWarnung ? 'warnung' : 'ok';
     const warning_message = beste.hatWarnung
-      ? `Wärmepumpenabdeckung ${beste.pct}% – Bosch markiert diese Variante mit Warnhinweis, manuelle Prüfung empfohlen`
+      ? `Wärmepumpenabdeckung ${beste.pct}%: Bosch markiert diese Variante mit Warnhinweis, manuelle Prüfung empfohlen`
       : null;
     console.log(`🎯 Decision: ${decision} (Abdeckung ${beste.pct}%) ${warning_message ?? ''}`);
 
