@@ -298,11 +298,11 @@ app.post('/api/run-advisor', async (req, res) => {
       console.log('📏 [12] Abstand-Schritt nicht vorhanden — übersprungen');
     }
     // ── SCHRITT 13: Produktauswahl ───────────────────────────────────────────
-    // Baureihe: immer 5800i — auch bei reinen Heizkörper-Objekten (vorher: HK → 6800i).
-    // Vorgabe des Bosch-Außendienstes: 5800i ist die anzubietende Serie, die höhere
-    // Vorlauftemperatur der 6800i wird für unsere Objekte nicht benötigt.
+    // Baureihe (Absprache Vertrieb, 10.11.2026): nur Heizkörper → 6800i, sonst 5800i.
+    // Mischsysteme ("Heizkörper & Fußbodenheizung") bleiben 5800i. Die Größe der
+    // Außeneinheit legt später die Heizlastberechnung in AuraOS fest.
     // Die Suffix-Logik unten (Heizkörper → MB) bleibt davon unberührt.
-    const serie = '5800i';
+    const serie = raumheizung === 'Heizkörper' ? '6800i' : '5800i';
 
     // ── SCHRITT 13a: Außeneinheit waehlen (1. Stufe der neuen Produktauswahl) ──
     console.log(`🌳 [13a] Außeneinheit-Stufe: Serie ${serie}`);
